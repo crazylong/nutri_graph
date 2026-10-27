@@ -16,6 +16,7 @@ const sendCodeBtn = document.getElementById('send-code');
 const gateMsg = document.getElementById('gate-msg');
 const who = document.getElementById('who');
 const whoMask = document.getElementById('who-mask');
+const gateDev = document.getElementById('gate-dev');
 const captchaField = document.getElementById('captcha-field');
 const captchaImg = document.getElementById('captcha-img');
 const captchaAnswer = document.getElementById('captcha-answer');
@@ -129,6 +130,8 @@ async function fetchCaptcha() {
   const r = await fetch('/auth/captcha');
   if (!r.ok) throw new Error('captcha fetch failed');
   const body = await r.json();
+  // 拿不到 SVG 就别去碰 img.src —— 空/坏的 data URI 会直接变成破图
+  if (!body.svg) throw new Error('captcha svg missing');
   captchaId = body.challenge_id;
   captchaImg.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(body.svg)));
   captchaField.hidden = false;
@@ -171,14 +174,17 @@ async function doSendCode() {
       body: JSON.stringify(payload)
     });
     const body = await r.json().catch(() => ({}));
+    if (!r.ok) gateDev.hidden = true;
 
     if (r.ok) {
-      // 演示通道不真发短信：说明去哪儿看，别让人干等
-      gateMsg.textContent =
-        (body.dev_code ? `验证码：${body.dev_code}（调试模式回填）` : '已下发。')
-        + ' 演示通道不发真实短信，验证码在服务器日志里：'
-        + ' journalctl -u nutri-graph | grep 验证码 | tail -1';
+      // 真实下发：回显掩码号让用户确认发对了号，别让人对着空白输入框干等
+      const to = body.phone_mask ? `已发送至 ${body.phone_mask}` : '已发送';
+      const minutes = Math.max(1, Math.round((body.expires_in || 300) / 60));
+      gateMsg.textContent = `${to}，${minutes} 分钟内有效。`;
       gateMsg.className = 'gate-msg ok';
+      // dev_code 只有本地 console 通道或平台显式回传时才出现，生产恒为空
+      gateDev.textContent = body.dev_code ? `调试通道回填验证码：${body.dev_code}` : '';
+      gateDev.hidden = !body.dev_code;
       hideCaptcha();
       startCountdown(body.interval || 60);
       codeEl.focus();
@@ -197,6 +203,11 @@ async function doSendCode() {
       sendCodeBtn.disabled = false;
     } else if (r.status === 429) {
       gateMsg.textContent = (body.detail && body.detail.message) || '发得太频繁了，等一会儿再试。';
+      gateMsg.className = 'gate-msg warn';
+      sendCodeBtn.disabled = false;
+    } else if (r.status === 503) {
+      // 通道没配好（缺 AK / 签名 / SDK）—— 重试多少次都没用，别让用户白等
+      gateMsg.textContent = '短信通道暂时不可用，请稍后再试或联系管理员。';
       gateMsg.className = 'gate-msg warn';
       sendCodeBtn.disabled = false;
     } else {
@@ -320,6 +331,435 @@ function el(tag, cls, text) {
   return n;
 }
 
+/* ============================================================
+   表格：把图谱事实按意图渲染成表格
+   吃的是 /chat 返回的 facts 字段（结构化），不是从回答文本里抠 ——
+   模型换个说法文本就变了，字段不会。
+   ============================================================ */
+const FACT_SPEC = {
+  nutrition: { title: '营养成分', cols: [['name', '营养素'], ['amount', '含量'], ['level', '证据'], ['claim', '依据']] },
+  pair: { title: '推荐搭配', cols: [['name', '食材'], ['detail', '效果'], ['level', '证据'], ['claim', '依据']] },
+  incompatible: { title: '不宜同食', cols: [['name', '食材'], ['detail', '原因'], ['level', '证据'], ['claim', '依据']] },
+  substitute: { title: '可替代', cols: [['name', '食材'], ['detail', '理由'], ['level', '证据']] },
+  contra_population: { title: '人群禁忌', cols: [['name', '人群'], ['symptom', '相关症状'], ['level', '证据'], ['claim', '依据']] },
+  contra_item: { title: '禁忌事项', cols: [['name', '事项'], ['level', '证据'], ['claim', '依据']] },
+  symptom_remedy: { title: '建议避开', cols: [['name', '食材'], ['population', '人群'], ['level', '证据'], ['claim', '依据']] },
+  other: { title: '图谱事实', cols: [['name', '名称'], ['detail', '说明'], ['level', '证据']] },
+};
+
+function fmtNum(v) {
+  return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100);
+}
+
+function clip(s, n = 46) {
+  const t = String(s ?? '').trim();
+  return t.length > n ? t.slice(0, n) + '…' : (t || '—');
+}
+
+function levelCell(row) {
+  const frag = document.createDocumentFragment();
+  const lv = row.evidence_level || '-';
+  frag.appendChild(el('span', `chip lv-${lv}`, `${lv} 级`));
+  if (row.provisional) frag.appendChild(el('span', 'chip flag', '单源'));
+  return frag;
+}
+
+function factCell(key, row) {
+  if (key === 'level') return levelCell(row);
+  if (key === 'amount') {
+    if (row.amount === null || row.amount === undefined) return document.createTextNode('—');
+    return document.createTextNode(`${fmtNum(row.amount)}${row.unit ? ' ' + row.unit : ''}`);
+  }
+  return document.createTextNode(clip(row[key]));
+}
+
+function renderFacts(facts) {
+  if (!facts || !facts.length) return null;
+  const groups = new Map();
+  facts.forEach((f) => {
+    const k = FACT_SPEC[f.intent] ? f.intent : 'other';
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(f);
+  });
+
+  const wrap = el('div', 'facts');
+  groups.forEach((rows, intent) => {
+    const spec = FACT_SPEC[intent] || FACT_SPEC.other;
+    const block = el('div', 'facts-block');
+    block.appendChild(el('div', 'facts-title', spec.title));
+    const table = el('table', 'facts-table');
+    const thead = el('thead');
+    const htr = el('tr');
+    spec.cols.forEach(([, label]) => htr.appendChild(el('th', null, label)));
+    thead.appendChild(htr);
+    table.appendChild(thead);
+    const tbody = el('tbody');
+    rows.forEach((r) => {
+      const tr = el('tr');
+      spec.cols.forEach(([key]) => {
+        const td = el('td');
+        td.appendChild(factCell(key, r));
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    block.appendChild(table);
+    wrap.appendChild(block);
+  });
+  return wrap;
+}
+
+/* 探索接口没有 facts，直接把边列成一张关系表 */
+function renderEdgeTable(g) {
+  const edges = (g && g.edges) || [];
+  if (!edges.length) return null;
+  const names = new Map(((g && g.nodes) || []).map((n) => [n.id, n.name]));
+  const block = el('div', 'facts-block');
+  block.appendChild(el('div', 'facts-title', '关系明细'));
+  const table = el('table', 'facts-table');
+  const thead = el('thead');
+  const htr = el('tr');
+  ['起点', '关系', '终点', '证据', '依据'].forEach((t) => htr.appendChild(el('th', null, t)));
+  thead.appendChild(htr);
+  table.appendChild(thead);
+  const tbody = el('tbody');
+  edges.forEach((e) => {
+    const tr = el('tr');
+    tr.appendChild(el('td', null, names.get(e.source) || e.source));
+    const tdRel = el('td');
+    tdRel.appendChild(el('span', e.provisional ? 'chip flag' : 'chip', e.rel_label || e.rel));
+    tr.appendChild(tdRel);
+    tr.appendChild(el('td', null, names.get(e.target) || e.target));
+    const tdLv = el('td');
+    tdLv.appendChild(levelCell(e));
+    tr.appendChild(tdLv);
+    tr.appendChild(el('td', null, clip(e.detail || e.claim)));
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  block.appendChild(table);
+  return block;
+}
+
+/* ============================================================
+   图谱可视化：纯 SVG + 自写力导向布局（不引任何第三方库）
+   ——这页是 nginx 直出的静态文件，多一个 CDN 依赖就多一个演示时打不开的风险。
+   ============================================================ */
+const NODE_META = {
+  Ingredient: { text: '食材', color: '#2f7d5d' },
+  Nutrient: { text: '营养素', color: '#2a5b83' },
+  Population: { text: '人群', color: '#b4772a' },
+  Symptom: { text: '症状', color: '#7a52a0' },
+  Taboo: { text: '禁忌', color: '#b0442f' },
+};
+const LEVEL_COLOR = { A: '#22684c', B: '#2a5b83', C: '#b4772a', D: '#9a9a9a', '': '#aab2ac' };
+
+function svgEl(tag, attrs = {}) {
+  const n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  Object.entries(attrs).forEach(([k, v]) => n.setAttribute(k, v));
+  return n;
+}
+
+/* Fruchterman-Reingold：斥力 k²/d、引力 d²/k、温度递减。
+   锚点（用户问到的食材）钉在中间，其余节点自由散开 —— 一眼能看出「围着谁在展开」。 */
+function forceLayout(nodes, edges, w, h) {
+  const pos = new Map();
+  const anchors = nodes.filter((n) => n.anchor);
+  const cx = w / 2;
+  const cy = h / 2;
+  const spread = Math.min(w * 0.36, 240);
+
+  nodes.forEach((n, i) => {
+    if (n.anchor) {
+      const idx = anchors.indexOf(n);
+      const t = anchors.length > 1 ? idx / (anchors.length - 1) - 0.5 : 0;
+      pos.set(n.id, { x: cx + t * spread, y: cy, fx: cx + t * spread, fy: cy });
+    } else {
+      const a = (i / Math.max(nodes.length, 1)) * Math.PI * 2 + 0.7;
+      const r = Math.min(w, h) * (0.26 + 0.14 * Math.random());
+      pos.set(n.id, { x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r, fx: null, fy: null });
+    }
+  });
+
+  const k = Math.sqrt((w * h) / (nodes.length + 2));
+  const links = edges.filter((e) => pos.has(e.source) && pos.has(e.target));
+  const steps = 300;
+  let temp = Math.min(w, h) / 9;
+
+  for (let s = 0; s < steps; s += 1) {
+    const disp = new Map(nodes.map((n) => [n.id, { x: 0, y: 0 }]));
+    for (let i = 0; i < nodes.length; i += 1) {
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const a = pos.get(nodes[i].id);
+        const b = pos.get(nodes[j].id);
+        let dx = a.x - b.x;
+        let dy = a.y - b.y;
+        let d = Math.hypot(dx, dy);
+        if (d < 0.5) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d = 0.5; }
+        const f = (k * k) / d;
+        const da = disp.get(nodes[i].id);
+        const db = disp.get(nodes[j].id);
+        da.x += (dx / d) * f; da.y += (dy / d) * f;
+        db.x -= (dx / d) * f; db.y -= (dy / d) * f;
+      }
+    }
+    for (const e of links) {
+      const a = pos.get(e.source);
+      const b = pos.get(e.target);
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      const d = Math.hypot(dx, dy) || 0.01;
+      const f = ((d * d) / k) * 0.6;
+      const da = disp.get(e.source);
+      const db = disp.get(e.target);
+      da.x -= (dx / d) * f; da.y -= (dy / d) * f;
+      db.x += (dx / d) * f; db.y += (dy / d) * f;
+    }
+    for (const n of nodes) {
+      const p = pos.get(n.id);
+      const d0 = disp.get(n.id);
+      d0.x += (cx - p.x) * 0.12;
+      d0.y += (cy - p.y) * 0.12;
+    }
+    for (const n of nodes) {
+      const p = pos.get(n.id);
+      if (p.fx !== null) { p.x = p.fx; p.y = p.fy; continue; }
+      const d0 = disp.get(n.id);
+      const d = Math.hypot(d0.x, d0.y) || 0.01;
+      const step = Math.min(d, temp);
+      p.x += (d0.x / d) * step;
+      p.y += (d0.y / d) * step;
+      const pad = 38;
+      p.x = Math.max(pad, Math.min(w - pad, p.x));
+      p.y = Math.max(pad, Math.min(h - pad - 10, p.y));
+    }
+    temp *= 0.975;
+  }
+  return pos;
+}
+
+function legendItem(color, text, dashed) {
+  const s = el('span', 'lg');
+  const sw = el('i', 'sw');
+  if (dashed) {
+    sw.style.border = `1.5px dashed ${color}`;
+    sw.style.background = 'transparent';
+  } else {
+    sw.style.background = color;
+  }
+  s.append(sw, document.createTextNode(text));
+  return s;
+}
+
+function graphLegend() {
+  const box = el('div', 'legend');
+  Object.values(NODE_META).forEach((m) => box.appendChild(legendItem(m.color, m.text)));
+  box.appendChild(el('span', 'lg-sep'));
+  ['A', 'B', 'C', 'D'].forEach((lv) =>
+    box.appendChild(legendItem(LEVEL_COLOR[lv], `${lv} 级 · ${LEVEL_LABEL[lv] || ''}`)));
+  box.appendChild(legendItem('#b4772a', '单源未交叉验证', true));
+  return box;
+}
+
+// 证据等级完整说明：面试展示时，让人一眼看懂 A/B/C/D 到底代表什么可信度
+function evidenceLevelHelp() {
+  const d = el('details', 'level-help');
+  d.appendChild(el('summary', null, '证据等级说明'));
+  const rows = [
+    ['A', '指南 / 临床共识 / 权威机构警示', '权威指南或机构发布，可信度最高'],
+    ['B', '实验测定 / 人群研究', '有实测数据或研究支撑'],
+    ['C', '传统典籍 / 药食同源目录', '传统典籍或单一来源补录，未做多源交叉验证'],
+    ['D', '民间流传 / 网络说法（未验证）', '未经验证，回答时通常会被过滤掉'],
+  ];
+  const ul = el('ul');
+  rows.forEach(([lv, name, desc]) => {
+    const li = el('li');
+    li.appendChild(legendItem(LEVEL_COLOR[lv], `${lv} 级 · ${name}`));
+    li.appendChild(el('span', 'lv-desc', desc));
+    ul.appendChild(li);
+  });
+  d.appendChild(ul);
+  const note = el('p', 'lv-note', '等级决定「这条关系能不能用、优先用哪条」：检索时按证据类型过滤（涉及医疗风险的人群禁忌只收 A/B 级），命中后按等级从高到低排序。');
+  d.appendChild(note);
+  return d;
+}
+
+let _graphSeq = 0;
+
+function renderGraph(host, data, opts = {}) {
+  host.innerHTML = '';
+  const nodes = ((data && data.nodes) || []).filter((n) => n && n.id);
+  const edges = ((data && data.edges) || []).filter(
+    (e) => nodes.some((n) => n.id === e.source) && nodes.some((n) => n.id === e.target)
+  );
+  if (!nodes.length) {
+    host.appendChild(el('p', 'muted', '（图谱里没有可画的内容）'));
+    return null;
+  }
+
+  const w = Math.max(host.clientWidth || 640, 300);
+  const h = opts.height || (nodes.length > 10 ? 360 : 280);
+  const pos = forceLayout(nodes, edges, w, h);
+  const seq = (_graphSeq += 1);
+  const radiusOf = (id) => {
+    const n = nodes.find((x) => x.id === id);
+    if (!n) return 18;
+    if (n.anchor) return 26;
+    return n.label === 'Ingredient' ? 21 : 17;
+  };
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${w} ${h}`, class: 'graph-svg', height: h, width: '100%' });
+  const defs = svgEl('defs');
+  const markerOf = new Map();
+  [...new Set(edges.map((e) => LEVEL_COLOR[e.evidence_level] || LEVEL_COLOR['']))].forEach((c, i) => {
+    const id = `g-arrow-${seq}-${i}`;
+    const m = svgEl('marker', {
+      id, viewBox: '0 0 8 8', refX: 7, refY: 4,
+      markerWidth: 6, markerHeight: 6, orient: 'auto-start-reverse',
+    });
+    m.appendChild(svgEl('path', { d: 'M0,1 L7,4 L0,7 z', fill: c }));
+    defs.appendChild(m);
+    markerOf.set(c, `url(#${id})`);
+  });
+  svg.appendChild(defs);
+
+  const gEdges = svgEl('g', { class: 'g-edges' });
+  const gNodes = svgEl('g', { class: 'g-nodes' });
+  svg.append(gEdges, gNodes);
+
+  const showLabel = edges.length <= 22;
+  const edgeEls = edges.map((e) => {
+    const color = LEVEL_COLOR[e.evidence_level] || LEVEL_COLOR[''];
+    const g = svgEl('g', { class: 'g-edge' + (e.provisional ? ' prov' : '') + (e.path ? ' path' : '') });
+    const line = svgEl('line', {
+      stroke: color,
+      'stroke-width': e.path ? 2.4 : 1.6,
+      'marker-end': markerOf.get(color) || '',
+    });
+    if (e.provisional) line.setAttribute('stroke-dasharray', '5 4');
+    g.appendChild(line);
+    let label = null;
+    if (showLabel) {
+      label = svgEl('text', { class: 'g-edge-label', fill: color, 'text-anchor': 'middle' });
+      label.textContent = e.rel_label || e.rel || '';
+      g.appendChild(label);
+    }
+    const title = svgEl('title');
+    const srcName = (nodes.find((n) => n.id === e.source) || {}).name || e.source;
+    const dstName = (nodes.find((n) => n.id === e.target) || {}).name || e.target;
+    title.textContent =
+      `${srcName} —${e.rel_label || e.rel}→ ${dstName}｜${e.evidence_level || '-'} 级`
+      + `${e.provisional ? '（单源）' : ''}\n${e.detail || e.claim || ''}`;
+    g.appendChild(title);
+    gEdges.appendChild(g);
+    return { e, line, label };
+  });
+
+  const nodeEls = nodes.map((n) => {
+    const meta = NODE_META[n.label] || { text: n.label || '节点', color: '#8b968e' };
+    const r = radiusOf(n.id);
+    const g = svgEl('g', { class: 'g-node' + (n.anchor ? ' anchor' : '') + (n.hop === 2 ? ' far' : '') });
+    g.appendChild(svgEl('circle', {
+      r, fill: meta.color, stroke: '#fff', 'stroke-width': 2,
+      'fill-opacity': n.hop === 2 ? 0.5 : 1,
+    }));
+    const text = svgEl('text', { class: 'g-node-label', 'text-anchor': 'middle', y: r + 15 });
+    text.textContent = n.name;
+    g.appendChild(text);
+    const title = svgEl('title');
+    title.textContent = `${meta.text}｜${n.name}${n.props && n.props.nature ? `（${n.props.nature}性）` : ''}\n${n.id}`;
+    g.appendChild(title);
+    gNodes.appendChild(g);
+    return { n, g, r };
+  });
+
+  function apply() {
+    edgeEls.forEach(({ e, line, label }) => {
+      const a = pos.get(e.source);
+      const b = pos.get(e.target);
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const ra = radiusOf(e.source) + 2;
+      const rb = radiusOf(e.target) + 7;
+      const x1 = a.x + (dx / d) * ra;
+      const y1 = a.y + (dy / d) * ra;
+      const x2 = b.x - (dx / d) * rb;
+      const y2 = b.y - (dy / d) * rb;
+      line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+      line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+      if (label) {
+        label.setAttribute('x', (x1 + x2) / 2);
+        label.setAttribute('y', (y1 + y2) / 2 - 5);
+      }
+    });
+    nodeEls.forEach(({ n, g }) => {
+      const p = pos.get(n.id);
+      g.setAttribute('transform', `translate(${p.x.toFixed(1)},${p.y.toFixed(1)})`);
+    });
+  }
+  apply();
+
+  // 拖拽：按住某个节点可以把它拽开，方便看被压住的边
+  nodeEls.forEach(({ n, g }) => {
+    let moved = false;
+    g.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      moved = false;
+      const p = pos.get(n.id);
+      const rect = svg.getBoundingClientRect();
+      const sx = w / (rect.width || w);
+      const sy = h / (rect.height || h);
+      const move = (ev2) => {
+        moved = true;
+        p.x = Math.max(24, Math.min(w - 24, (ev2.clientX - rect.left) * sx));
+        p.y = Math.max(24, Math.min(h - 24, (ev2.clientY - rect.top) * sy));
+        apply();
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+    g.addEventListener('click', () => {
+      if (moved) return;
+      if (opts.onNodeClick) opts.onNodeClick(n);
+    });
+  });
+
+  host.appendChild(svg);
+  return { nodes, edges };
+}
+
+/* 回答卡片里的图谱：默认展开，一眼看到「答案是从哪张子图上得出来的」 */
+function renderGraphBlock(g) {
+  const n = (g.nodes || []).length;
+  const m = (g.edges || []).length;
+  const d = el('details', 'graph-block');
+  d.open = true;
+  d.appendChild(el('summary', null, `图谱结构 · ${n} 个节点 / ${m} 条关系`));
+  const box = el('div', 'graph-box');
+  d.appendChild(box);
+  d.appendChild(graphLegend());
+  d.appendChild(evidenceLevelHelp());
+
+  const actions = el('div', 'graph-actions');
+  const btn = el('button', 'ghost-btn', '在图谱探索中打开');
+  btn.addEventListener('click', () => {
+    const anchors = (g.nodes || []).filter((x) => x.anchor);
+    openDrawer(anchors[0] ? anchors[0].name : '', anchors[1] ? anchors[1].name : '');
+  });
+  actions.appendChild(btn);
+  d.appendChild(actions);
+
+  // 要等元素进 DOM 才有宽度，否则 SVG 会按 0 宽布局
+  requestAnimationFrame(() => renderGraph(box, g, { height: n > 10 ? 340 : 270 }));
+  return d;
+}
+
 const scrollDown = () => { thread.scrollTop = thread.scrollHeight; };
 
 function hideEmpty() {
@@ -371,6 +811,15 @@ function renderAnswer(body) {
     card.appendChild(meta);
   }
 
+  // 结构化表格：和上面那段自然语言吃的是同一批图数据
+  const factsBlock = renderFacts(body.facts);
+  if (factsBlock) card.appendChild(factsBlock);
+
+  // 子图：把「这次回答用到图的哪一块」直接画出来
+  if (body.subgraph && (body.subgraph.nodes || []).length) {
+    card.appendChild(renderGraphBlock(body.subgraph));
+  }
+
   const basis = body.basis || [];
   if (basis.length) {
     const d = el('details', 'basis');
@@ -407,6 +856,124 @@ function renderError(status, detail) {
   card.appendChild(el('p', 'answer', msg));
   wrap.append(el('div', 'avatar', '!'), card);
   return wrap;
+}
+
+/* ============================================================
+   图谱探索抽屉：输入两个食材，看它们在图里是什么关系
+   ============================================================ */
+const drawer = document.getElementById('drawer');
+const gA = document.getElementById('g-a');
+const gB = document.getElementById('g-b');
+const gGo = document.getElementById('g-go');
+const gExpand = document.getElementById('g-expand');
+const gMsg = document.getElementById('g-msg');
+const gGraph = document.getElementById('g-graph');
+const gFacts = document.getElementById('g-facts');
+
+const KIND_TEXT = {
+  direct: '两个食材在图上直接相连：',
+  path: '两个食材没有直接关系，但在 {hops} 跳内连通（例如经由同一种营养素/人群）：',
+  none: '这两个食材在现有图谱里暂时连不上 —— 没有已知的搭配、相克或共同的营养素节点。',
+};
+
+async function loadGraph(a, b) {
+  a = (a ?? gA.value).trim();
+  b = (b ?? gB.value).trim();
+  if (!a) {
+    gMsg.className = 'gate-msg warn';
+    gMsg.textContent = '至少填一个食材名';
+    gA.focus();
+    return;
+  }
+  gGo.disabled = true;
+  gMsg.className = 'gate-msg';
+  gMsg.textContent = '正在查图谱…';
+  gGraph.innerHTML = '';
+  gFacts.innerHTML = '';
+
+  const expand = gExpand.checked ? 'true' : 'false';
+  const url = b
+    ? `/kg/relation?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&expand=${expand}`
+    : `/kg/subgraph?food=${encodeURIComponent(a)}&depth=${gExpand.checked ? 2 : 1}`;
+
+  try {
+    const r = await api(url);
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const d = body.detail || {};
+      gMsg.className = 'gate-msg warn';
+      gMsg.textContent = d.message || `查询失败（${r.status}）`;
+      return;
+    }
+    const g = body.subgraph || { nodes: [], edges: [] };
+    const kind = (g.meta || {}).kind;
+    let head = '';
+    if (b) {
+      const tpl = KIND_TEXT[kind] || '';
+      head = tpl.replace('{hops}', (g.meta || {}).hops || 3);
+      if (kind && kind !== 'none') {
+        const na = (body.a || {}).name || a;
+        const nb = (body.b || {}).name || b;
+        head = `「${na}」与「${nb}」：` + head.replace(/^两个食材/, '');
+      }
+      gMsg.className = 'gate-msg';
+    } else {
+      head = `「${(body.resolved || {}).name || a}」的邻域`;
+      gMsg.className = 'gate-msg';
+    }
+    gMsg.textContent = head + ((g.meta || {}).truncated ? '　（节点较多，已按规模截断）' : '');
+
+    renderGraph(gGraph, g, {
+      height: (g.nodes || []).length > 10 ? 380 : 300,
+      onNodeClick: (n) => {
+        // 点食材节点继续往下钻；其他类型点了没意义
+        if (n.label === 'Ingredient') {
+          gA.value = n.name;
+          gB.value = '';
+          loadGraph(n.name, '');
+        }
+      },
+    });
+    const table = renderEdgeTable(g);
+    if (table) {
+      gFacts.innerHTML = '';
+      const box = el('div', 'facts');
+      box.appendChild(table);
+      gFacts.appendChild(box);
+    }
+  } catch {
+    gMsg.className = 'gate-msg warn';
+    gMsg.textContent = '网络异常，重试一下。';
+  } finally {
+    gGo.disabled = false;
+  }
+}
+
+function openDrawer(a, b) {
+  if (!drawer) return;
+  drawer.hidden = false;
+  if (a !== undefined) gA.value = a || '';
+  if (b !== undefined) gB.value = b || '';
+  if (a) loadGraph(gA.value.trim(), (gB.value || '').trim());
+}
+
+if (drawer) {
+  document.getElementById('drawer-close').addEventListener('click', () => {
+    drawer.hidden = true;
+  });
+  document.getElementById('open-graph').addEventListener('click', () => openDrawer('', ''));
+  gGo.addEventListener('click', () => loadGraph());
+  [gA, gB].forEach((i) => i.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) loadGraph();
+  }));
+  gExpand.addEventListener('change', () => {
+    if (gA.value.trim()) loadGraph();
+  });
+  document.querySelectorAll('.mini-sample').forEach((btn) =>
+    btn.addEventListener('click', () => openDrawer(btn.dataset.a || '', btn.dataset.b || '')));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !drawer.hidden) drawer.hidden = true;
+  });
 }
 
 /* ============================================================

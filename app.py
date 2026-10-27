@@ -24,6 +24,7 @@ from api.chat import router as chat_router
 from api.health import router as health_router
 from api.kg import router as kg_router
 from api.system import router as system_router
+from security.sms import describe_config
 
 logging.basicConfig(
     level=logging.DEBUG if config.DEBUG else logging.INFO,
@@ -52,6 +53,24 @@ def _startup_report() -> None:
         log.warning(
             "SMS_PROVIDER=console 但 DEBUG=false：不会真正发短信，验证码只出现在日志里"
         )
+    elif config.SMS_PROVIDER == "dypns":
+        # 真发短信前把「能不能发」说清楚：缺凭据/缺 SDK 时 /auth/sms 一律 503，
+        # 与其让用户点了半天才发现，不如启动就把缺的东西列出来。
+        ok, missing, sdk_ok = describe_config()
+        if ok and sdk_ok:
+            log.info(
+                "短信通道 dypns 就绪：签名=%s 模板=%s 验证码 %d 位 / %d 秒",
+                config.SMS_SIGN_NAME,
+                config.SMS_TEMPLATE_CODE,
+                config.SMS_CODE_LENGTH,
+                config.SMS_VALID_TIME_S,
+            )
+        else:
+            log.error(
+                "短信通道 dypns 不可用：%s%s 登录将无法发送验证码（/auth/sms 返回 503）",
+                ("缺少配置 " + ", ".join(missing) + "；") if missing else "",
+                "" if sdk_ok else "缺少 SDK alibabacloud_dypnsapi20170525；",
+            )
 
 
 @asynccontextmanager

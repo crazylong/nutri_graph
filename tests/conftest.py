@@ -73,8 +73,14 @@ def _fresh_alias_cache():
     yield
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _destructive_guard():
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "no_db: 纯逻辑用例，不连 PostgreSQL / Neo4j，也不受「非测试库」保护的影响"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _destructive_guard(request):
     """拦住「对着有数据的库跑测试」这件事。
 
     这套用例会 TRUNCATE 业务表（kg_food_bundle / kg_ingredient_request / app_user …），
@@ -86,7 +92,12 @@ def _destructive_guard():
     而黑豆还在图上正常回答。
 
     所以：库名带 test 才放行，否则必须显式给 TEST_DB_OK=1。
+
+    标了 no_db 的用例（纯逻辑，一行 SQL 都不发）直接放行 ——
+    否则「本机连着部署库」会把这类用例一起跳过，等于没跑。
     """
+    if "no_db" in request.keywords:
+        return
     if not PG_OK:
         return
     import config

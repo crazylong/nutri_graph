@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import config
@@ -27,8 +29,42 @@ class LLMUnavailableError(RuntimeError):
 
 _router: ModelRouter | None = None
 _lock = threading.Lock()
-_models: dict[tuple, Any] = {}   # (模型名, temperature, max_tokens) -> ChatOpenAI
-_chains: dict[tuple, Any] = {}   # (候选模型名, temperature, max_tokens) -> Runnable
+_models: dict[tuple, Any] = {}   # (模型名, temperature, max_tokens, extras) -> ChatOpenAI
+_chains: dict[tuple, Any] = {}   # (候选, temperature, max_tokens, thinking) -> Runnable
+
+# 一次 invoke_model 是否显式开关思考。None = 不传这个参数，沿用模型默认。
+_enable_thinking: ContextVar[bool | None] = ContextVar("llm_enable_thinking", default=None)
+
+# 百炼「仅思考」型号关不掉。给它们传 enable_thinking=false 时，
+# 有的端点回 400；400 在中间件里算客户端错误，不会换下一个模型。
+_THINKING_ONLY = ("2.4t-a95b", "deepseek-r1")
+
+
+def thinking_can_be_disabled(model_name: str) -> bool:
+    name = (model_name or "").lower()
+    return not any(mark in name for mark in _THINKING_ONLY)
+
+
+def current_enable_thinking() -> bool | None:
+    return _enable_thinking.get()
+
+
+@contextmanager
+def override_enable_thinking(value: bool | None):
+    token = _enable_thinking.set(value)
+    try:
+        yield
+    finally:
+        _enable_thinking.reset(token)
+
+
+def _freeze(value: Any) -> Any:
+    """缓存键要可哈希。extra_body 是 dict，不能直接放进 tuple。"""
+    if isinstance(value, dict):
+        return tuple(sorted((str(k), _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
 
 
 # ============================================================
@@ -72,18 +108,28 @@ def chat_model(
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    enable_thinking: bool | None = None,
     **kwargs,
 ):
     """把池里的一个模型构造成 ChatOpenAI（走百炼 OpenAI 兼容端点）。
 
     max_retries=0：同一模型原地重试没有意义，换模型才是有效动作，
     而「换模型」由 wrap_call_model / with_fallbacks 负责。
+
+    enable_thinking=False 关掉混合思考模型的推理（百炼扩展参数，走 extra_body）。
+    仅思考型号传了会 400，这里直接省略。
     """
     from langchain_openai import ChatOpenAI
 
     t = config.LLM_TEMPERATURE if temperature is None else temperature
     mt = config.LLM_MAX_TOKENS if max_tokens is None else max_tokens
-    key = (spec.name, t, mt, tuple(sorted(kwargs.items())))
+    extras = dict(kwargs)
+    # 仅思考型号省略这个参数：传 false 会 400，而 400 不会触发换模型。
+    if enable_thinking is not None and thinking_can_be_disabled(spec.name):
+        body = dict(extras.pop("extra_body", None) or {})
+        body["enable_thinking"] = enable_thinking
+        extras["extra_body"] = body
+    key = (spec.name, t, mt, tuple(sorted((k, _freeze(v)) for k, v in extras.items())))
     model = _models.get(key)
     if model is None:
         model = ChatOpenAI(
@@ -94,7 +140,7 @@ def chat_model(
             max_tokens=mt,
             timeout=config.LLM_TIMEOUT,
             max_retries=0,
-            **kwargs,
+            **extras,
         )
         _models[key] = model
     return model
@@ -135,7 +181,12 @@ def primary_model(**kwargs):
     return chat_model(fb, **kwargs)
 
 
-def pool_chain(*, temperature: float | None = None, max_tokens: int | None = None):
+def pool_chain(
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    enable_thinking: bool | None = None,
+):
     """LangChain 原生回退链：`head.with_fallbacks(rest)`。
 
     给需要原生 BaseChatModel 语义、又不方便进 Agent 的调用点使用
@@ -150,10 +201,18 @@ def pool_chain(*, temperature: float | None = None, max_tokens: int | None = Non
             raise _no_candidate_error(router)
         log.warning("池内模型全部不可用，回退链只用兜底模型 %s", fb.name)
         cands = [fb]
-    key = (tuple(s.name for s in cands), temperature, max_tokens)
+    key = (tuple(s.name for s in cands), temperature, max_tokens, enable_thinking)
     chain = _chains.get(key)
     if chain is None:
-        models = [chat_model(s, temperature=temperature, max_tokens=max_tokens) for s in cands]
+        models = [
+            chat_model(
+                s,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                enable_thinking=enable_thinking,
+            )
+            for s in cands
+        ]
         head, *rest = models
         chain = head.with_fallbacks(rest) if rest else head
         _chains[key] = chain

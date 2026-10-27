@@ -18,6 +18,20 @@ from api.deps import get_principal, require_user_when_enforced
 router = APIRouter(tags=["chat"])
 
 
+def _facts(result: dict) -> list[dict]:
+    """图命中行 → 表格行。没走图谱时是空列表，前端据此不渲染表格。"""
+    from kg.subgraph import build_facts
+
+    return build_facts(result.get("_graph_results") or [])
+
+
+def _subgraph(result: dict) -> dict | None:
+    """图命中行 → nodes/edges。只在这条回答真的走过图谱时才有值。"""
+    from kg.subgraph import build_subgraph
+
+    return build_subgraph(result.get("_entities") or [], result.get("_graph_results") or [])
+
+
 @router.post("/chat")
 def chat(payload: dict, who: dict | None = Depends(get_principal)):
     """走 LangGraph 检索链路：guard → link → route → graph/vector → assemble → generate。"""
@@ -60,6 +74,10 @@ def chat(payload: dict, who: dict | None = Depends(get_principal)):
         "degraded": result.get("_degraded", False),
         "graph_hit": result.get("_graph_hit", False),
         "evidence_counts": result.get("_evidence_counts", {}),
+        # 表格与子图吃的是**结构化字段**，不是让前端去正则抠回答文本：
+        # 模型换个说法，正则就废了；字段不会。
+        "facts": _facts(result),
+        "subgraph": _subgraph(result),
         # 未收录时把登记结果结构化带出去：前端要显示编号和进度，
         # 不能让人从「已记录（编号 #170）」这句话里正则抠数字。
         "food_requests": result.get("_food_requests", []),

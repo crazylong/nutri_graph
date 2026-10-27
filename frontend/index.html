@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>食疗问答 · nutri_graph</title>
-<link rel="stylesheet" href="/assets/styles.css">
+<link rel="stylesheet" href="/assets/styles.css?v=20261028d">
 </head>
 <body>
 
@@ -48,9 +48,10 @@
     <button type="submit" class="primary-btn" id="login-btn">登录</button>
 
     <p class="gate-hint">
-      演示环境未接真实短信通道，验证码只写在服务器日志里：
-      <code>journalctl -u nutri-graph | grep 验证码 | tail -1</code>
+      验证码会真实发送到该手机号，5 分钟内有效。收不到先检查信号，等倒计时结束后再点「获取验证码」。
     </p>
+    <!-- 只有本地调试通道（console / 平台回传）才会回填，生产永远不显示 -->
+    <p class="gate-hint dev" id="gate-dev" hidden></p>
   </form>
 </div>
 
@@ -65,6 +66,7 @@
   <nav class="topnav">
     <a href="/docs" target="_blank" rel="noopener">接口文档</a>
     <a href="/health" target="_blank" rel="noopener">健康状态</a>
+    <button class="link-btn" id="open-graph">图谱探索</button>
     <span class="who" id="who" hidden>
       <span id="who-mask"></span>
       <button class="link-btn" id="logout">退出</button>
@@ -95,6 +97,34 @@
   <p class="hint">Enter 发送 · Shift + Enter 换行 · 回答仅供健康科普参考，不能替代医生诊断</p>
 </footer>
 
-<script src="/assets/app.js"></script>
+<!-- 图谱探索：输入一或两个食材，把它们在知识图谱里的关系画出来 -->
+<aside class="drawer" id="drawer" hidden aria-label="图谱探索">
+  <div class="drawer-head">
+    <div>
+      <h2>图谱探索</h2>
+      <p>看食材之间在图里到底怎么连</p>
+    </div>
+    <button class="icon-btn" id="drawer-close" aria-label="关闭">×</button>
+  </div>
+
+  <div class="drawer-form">
+    <input id="g-a" placeholder="食材 A，如：黑豆" autocomplete="off">
+    <input id="g-b" placeholder="食材 B（可选），如：菠菜" autocomplete="off">
+    <button class="primary-btn sm" id="g-go">查看关系</button>
+    <label class="check"><input type="checkbox" id="g-expand"> 展开两侧邻域（两跳）</label>
+    <div class="mini-samples">
+      <button class="mini-sample" data-a="西红柿" data-b="牛肉">西红柿 · 牛肉</button>
+      <button class="mini-sample" data-a="菠菜" data-b="豆腐">菠菜 · 豆腐</button>
+      <button class="mini-sample" data-a="黑豆" data-b="">黑豆（单食材）</button>
+    </div>
+  </div>
+
+  <p class="gate-msg" id="g-msg" role="status"></p>
+  <div class="graph-box" id="g-graph"></div>
+  <div id="g-facts"></div>
+  <p class="disclaimer">点食材节点可继续下钻；拖动节点可以拉开被压住的边。</p>
+</aside>
+
+<script src="/assets/app.js?v=20261028d"></script>
 </body>
 </html>

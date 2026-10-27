@@ -8,13 +8,19 @@ from starlette.requests import Request
 
 import config
 from api.deps import client_ip
-from graph.boundary import build_document_prompt, build_grounded_prompt
+from graph.boundary import (
+    build_document_prompt,
+    build_grounded_prompt,
+    mentions_health_constraint,
+)
 from graph.nodes import (
+    _complete_from_prompt,
     _recent_dialogue,
     generate_node,
     memory_write_node,
     route_after_link,
 )
+from llm.router import thinking_can_be_disabled
 from kg.normalize import EntityLinker, get_alias_store
 from kg.query import TEMPLATES, detect_intent, plan_queries
 
@@ -179,9 +185,58 @@ def test_memory_write_returns_session_id(monkeypatch):
 
     monkeypatch.setattr(config, "MEMORY_ENABLED", True)
     monkeypatch.setattr("memory.short_term.ShortTermMemory", FakeMemory)
-    monkeypatch.setattr("graph.nodes._get_llm", lambda: None)
     out = memory_write_node({"question": "q", "answer": "a", "user_id": "u"})
     assert out["session_id"] == "sid-1"
+
+
+def test_health_constraint_cues():
+    assert mentions_health_constraint("我对花生过敏")
+    assert mentions_health_constraint("痛风能吃海鲜吗")
+    assert not mentions_health_constraint("黑豆和什么一起吃")
+
+
+def test_memory_write_defers_profile_only_when_cued(monkeypatch):
+    class FakeMemory:
+        def get_session(self, user_id):
+            return "sid-1"
+
+        def save_round(self, session_id, question, answer):
+            return None
+
+    deferred = []
+    monkeypatch.setattr(config, "MEMORY_ENABLED", True)
+    monkeypatch.setattr(config, "DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setattr("memory.short_term.ShortTermMemory", FakeMemory)
+    monkeypatch.setattr("graph.nodes._defer_profile", lambda *args: deferred.append(args))
+
+    memory_write_node({"question": "黑豆怎么吃", "answer": "a", "user_id": "u"})
+    assert deferred == []
+
+    memory_write_node({"question": "我对花生过敏", "answer": "先别吃", "user_id": "u"})
+    assert deferred == [("u", "我对花生过敏", "先别吃")]
+
+
+def test_answer_call_disables_thinking(monkeypatch):
+    seen = {}
+
+    class Msg:
+        content = '{"answer":"行","basis":[],"gaps":[],"confidence":0.8}'
+
+    def fake(prompt, **kwargs):
+        seen.update(kwargs)
+        return Msg()
+
+    monkeypatch.setattr("llm.invoke_model", fake)
+    out = _complete_from_prompt("p")
+    assert seen["enable_thinking"] is False
+    assert out["answer"] == "行"
+
+
+def test_thinking_only_models_skip_the_flag():
+    assert thinking_can_be_disabled("qwen3.8-max")
+    assert thinking_can_be_disabled("deepseek-v4-flash-0731")
+    assert not thinking_can_be_disabled("qwen3.8-2.4t-a95b")
+    assert not thinking_can_be_disabled("deepseek-r1")
 
 
 class _Store:

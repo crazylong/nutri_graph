@@ -132,6 +132,20 @@ def build_document_prompt(
     )
 
 
+# 用户原话里出现这些，才可能是在透露自己的饮食约束。
+# 没有就不要再打一次模型：搭配、营养这类问法占了绝大多数请求。
+_PROFILE_CUES = (
+    "过敏", "忌口", "忌食", "不吃", "不能吃",
+    "痛风", "糖尿", "高血压", "低血压", "肾病",
+    "孕妇", "怀孕", "哺乳", "慢病", "慢性",
+)
+
+
+def mentions_health_constraint(text: str) -> bool:
+    """这句话里有没有可能在说自己的过敏、慢病或忌口。"""
+    return any(cue in (text or "") for cue in _PROFILE_CUES)
+
+
 # 画像抽取 prompt（after_model 钩子用）
 PROFILE_EXTRACT_PROMPT = (
     "从下面这轮对话中判断用户是否透露了饮食相关的健康约束。\n"

@@ -48,9 +48,9 @@ httpx>=0.28.1,<1.0.0
 pyjwt>=2.8.0,<3.0.0
 cryptography>=43.0.0
 
-# 短信认证（阿里云号码认证服务 PNVS）—— 仅 SMS_PROVIDER=dypns 时需要，
-# 代码里是惰性导入，配成 console 时无需安装。生产部署请取消下面一行的注释：
-# alibabacloud_dypnsapi20170525>=2.0.0
+# 短信认证（阿里云号码认证服务 PNVS）—— SMS_PROVIDER=dypns 时必需。
+# 纯 Python 包，装了也没有副作用；控制台把 SMS_PROVIDER 改成 console 时不会调用。
+alibabacloud_dypnsapi20170525>=2.0.0,<3.0.0
 
 # ---- 测试 ----
 pytest>=8.0.0,<9.0.0

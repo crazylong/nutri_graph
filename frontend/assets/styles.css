@@ -263,6 +263,197 @@ details.basis li { font-size: 13px; color: var(--ink-2); margin: 3px 0; }
   .q .bubble { max-width: 88%; }
 }
 
+/* ---------- 事实表格 ---------- */
+.facts { margin-top: 14px; display: flex; flex-direction: column; gap: 14px; }
+
+.facts-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+  margin-bottom: 6px;
+}
+
+.facts-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.facts-table th,
+.facts-table td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.facts-table th {
+  color: var(--ink-3);
+  font-weight: 500;
+  font-size: 12px;
+  background: #fafbfa;
+  white-space: nowrap;
+}
+
+.facts-table tbody tr:last-child td { border-bottom: 0; }
+.facts-table tbody tr:hover { background: #fbfdfc; }
+.facts-table td:first-child { font-weight: 600; color: var(--ink); }
+.facts-table td .chip { font-size: 11px; padding: 1px 6px; }
+
+/* ---------- 图谱 ---------- */
+.graph-block { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.graph-block > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-2);
+  list-style: none;
+  user-select: none;
+}
+.graph-block > summary::-webkit-details-marker { display: none; }
+.graph-block > summary::before { content: "▸ "; color: var(--ink-3); }
+.graph-block[open] > summary::before { content: "▾ "; }
+
+.graph-box {
+  margin-top: 8px;
+  background: #fbfdfc;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.graph-svg { display: block; touch-action: none; }
+.graph-svg .g-node { cursor: grab; }
+.graph-svg .g-node:active { cursor: grabbing; }
+.graph-svg .g-node.far { opacity: .72; }
+
+.g-node-label {
+  font-size: 12px;
+  font-weight: 600;
+  fill: var(--ink);
+  stroke: #fbfdfc;
+  stroke-width: 3.5px;
+  paint-order: stroke fill;
+}
+.g-node.anchor .g-node-label { font-size: 13px; }
+
+.g-edge-label {
+  font-size: 10.5px;
+  stroke: #fbfdfc;
+  stroke-width: 3px;
+  paint-order: stroke fill;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.legend .lg { display: inline-flex; align-items: center; }
+.legend .sw {
+  width: 9px; height: 9px; border-radius: 50%;
+  display: inline-block; margin-right: 5px;
+}
+.legend .lg-sep { width: 1px; height: 12px; background: var(--line); margin: 0 2px; }
+
+/* 证据等级说明（可折叠） */
+.level-help { margin-top: 10px; font-size: 12px; color: var(--ink-3); }
+.level-help > summary {
+  cursor: pointer; user-select: none; font-weight: 600;
+  color: var(--ink-2); padding: 2px 0;
+}
+.level-help > summary::-webkit-details-marker { display: none; }
+.level-help > summary::before { content: "▸ "; color: var(--ink-3); }
+.level-help[open] > summary::before { content: "▾ "; }
+.level-help ul { list-style: none; margin: 8px 0 6px; padding: 0; }
+.level-help li {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 4px 0; border-bottom: 1px dashed var(--line);
+}
+.level-help li:last-child { border-bottom: none; }
+.level-help .lg { flex: 0 0 auto; }
+.level-help .lv-desc { color: var(--ink-3); }
+.level-help .lv-note { margin: 8px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--ink-3); }
+
+.graph-actions { margin-top: 10px; }
+
+/* ---------- 图谱探索抽屉 ---------- */
+.drawer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: min(560px, 100vw);
+  z-index: 40;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  box-shadow: -12px 0 40px rgba(28, 36, 32, .12);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 20px 22px;
+  overflow-y: auto;
+}
+.drawer[hidden] { display: none; }
+
+.drawer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.drawer-head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.drawer-head p { margin: 2px 0 0; font-size: 12.5px; color: var(--ink-3); }
+
+.icon-btn {
+  border: 1px solid var(--line);
+  background: #fbfcfb;
+  color: var(--ink-2);
+  width: 30px; height: 30px;
+  border-radius: 9px;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.drawer-form { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+
+.drawer-form input[type="text"],
+.drawer-form input:not([type]) {
+  font: inherit;
+  font-size: 13.5px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  outline: none;
+  background: #fcfdfc;
+}
+.drawer-form input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(47, 125, 93, .1);
+}
+
+.primary-btn.sm { font-size: 14px; padding: 9px; }
+
+.check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
+
+.mini-samples { display: flex; flex-wrap: wrap; gap: 8px; }
+.mini-sample {
+  border: 1px dashed var(--line);
+  background: #fbfcfb;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: .15s;
+}
+.mini-sample:hover { border-style: solid; border-color: var(--accent); color: var(--accent); }
+
+@media (max-width: 640px) {
+  .drawer { width: 100vw; padding: 14px 14px 20px; }
+  .facts-table { font-size: 12px; }
+  .facts-table th, .facts-table td { padding: 6px 7px; }
+}
+
 /* ---------- 登录闸门 ---------- */
 .gate {
   position: fixed;
@@ -303,6 +494,10 @@ details.basis li { font-size: 13px; color: var(--ink-2); margin: 3px 0; }
 
 .field { display: block; margin-bottom: 14px; }
 .field > span { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 6px; }
+/* 作者样式的 display:block 会盖掉浏览器默认的 [hidden]{display:none}，
+   所以图形验证码那行（#captcha-field）必须自己声明一次，否则一进页面就露出来，
+   连带那个还没赋 src 的 <img> 变成破图。和上面的 .gate[hidden] 同一类坑。 */
+.field[hidden] { display: none; }
 
 .field input {
   width: 100%;
@@ -371,6 +566,16 @@ details.basis li { font-size: 13px; color: var(--ink-2); margin: 3px 0; }
   line-height: 1.6;
   color: var(--ink-3);
 }
+/* 调试通道回填的那行：只在本地/联调出现，给个警示色别当成正常提示 */
+.gate-hint.dev {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--warn-weak);
+  color: var(--warn);
+}
+.gate-hint[hidden] { display: none; }
+
 .gate-hint code {
   display: inline-block;
   margin-top: 4px;

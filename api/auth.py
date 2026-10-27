@@ -29,7 +29,7 @@ from api.deps import client_ip, get_current_user, get_principal
 from memory.anonymous_merge import merge_anon_into_user
 from security import captcha, ratelimit
 from security.crypto import encrypt_phone, phone_hash, phone_mask
-from security.sms import get_provider
+from security.sms import SmsConfigError, SmsProvider, get_provider
 from security.tokens import (
     InvalidTokenError,
     TokenReuseError,
@@ -142,6 +142,22 @@ def _record_consent(user_id: str, version: str, ip: str) -> None:
         log.error("记录隐私同意失败 user=%s version=%s：%s", user_id, version, exc)
 
 
+def _channel() -> SmsProvider:
+    """取通道；没配好时给 503 而不是 500。
+
+    凭据缺失是部署问题，不是 bug：500 会让人去翻堆栈，
+    503 + 明确文案才是对运维说的话（启动日志里还有缺哪几项的清单）。
+    """
+    try:
+        return get_provider()
+    except SmsConfigError as exc:
+        log.error("短信通道未配置：%s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "sms_unconfigured", "message": "短信通道未配置，暂时无法登录"},
+        ) from exc
+
+
 def _too_many(dec: ratelimit.Decision) -> HTTPException:
     return HTTPException(
         status_code=429,
@@ -204,7 +220,7 @@ def send_sms(req: SmsRequest, request: Request):
     if not dec.allowed:
         raise _too_many(dec)
 
-    provider = get_provider()
+    provider = _channel()
     result = provider.send(phone)
 
     ratelimit.record_send(
@@ -229,6 +245,9 @@ def send_sms(req: SmsRequest, request: Request):
     body = {
         "ok": True,
         "provider": provider.name,
+        # 回显掩码号：让用户确认「发到的是不是自己填的那个号」，
+        # 掩码由服务端算，不含明文，也不泄露是否注册过
+        "phone_mask": phone_mask(phone),
         "expires_in": config.SMS_VALID_TIME_S,
         "interval": config.SMS_INTERVAL_S,
         # 告诉前端：下次（同一 IP 再发）需要图形验证码了
@@ -253,7 +272,7 @@ def exchange_token(req: TokenRequest, request: Request):
     if not locked.allowed:
         raise _too_many(locked)
 
-    provider = get_provider()
+    provider = _channel()
     ok, reason = provider.verify(phone, req.code.strip())
     ratelimit.record_verify(ph, ip, "login", ok)
 

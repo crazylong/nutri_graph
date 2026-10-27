@@ -28,6 +28,15 @@ from security.crypto import hmac_hex, new_numeric_code, pepper, phone_hash, phon
 log = logging.getLogger("security.sms")
 
 
+class SmsConfigError(RuntimeError):
+    """通道没配好（缺 AK / 缺签名 / 缺 SDK）。
+
+    单独拎出来是因为它不是「用户操作错误」，也不是「上游抖动」：
+    返回 500 会让前端显示「服务异常」，运维以为是 bug；
+    返回 503 才是真相 —— 这个能力当前不可用，等管理员配好再来。
+    """
+
+
 @dataclass
 class SendResult:
     ok: bool
@@ -116,9 +125,10 @@ class DypnsProvider(SmsProvider):
             if not str(v).strip()
         ]
         if missing:
-            raise RuntimeError(
+            raise SmsConfigError(
                 "短信认证（dypns）缺少配置：" + ", ".join(missing) + "。"
                 "签名/模板要在号码认证控制台的「赠送签名 / 赠送模板」页复制，不能自定义。"
+                "开通步骤见 docs/sms-dypns-setup.md"
             )
         self._client = None
 
@@ -130,7 +140,7 @@ class DypnsProvider(SmsProvider):
             from alibabacloud_dypnsapi20170525.client import Client
             from alibabacloud_tea_openapi import models as open_api_models
         except ImportError as exc:  # pragma: no cover - 依赖缺失时的明确提示
-            raise RuntimeError(
+            raise SmsConfigError(
                 "缺少短信认证 SDK：pip install alibabacloud_dypnsapi20170525"
             ) from exc
 
@@ -182,6 +192,9 @@ class DypnsProvider(SmsProvider):
             if config.SMS_RETURN_VERIFY_CODE and model is not None:
                 dev_code = getattr(model, "verify_code", "") or ""
             return SendResult(ok=True, provider=self.name, msg_id=out_id, dev_code=dev_code)
+        except SmsConfigError:
+            # 没配好就是没配好，让 api 层翻译成 503，不要伪装成「上游失败」
+            raise
         except Exception as exc:  # noqa: BLE001 —— 不让第三方异常穿透到业务层
             log.exception("短信认证调用异常")
             return SendResult(ok=False, provider=self.name, error=str(exc)[:200])
@@ -205,6 +218,8 @@ class DypnsProvider(SmsProvider):
             result = str(getattr(model, "verify_result", "") or "").upper()
             # 平台返回 PASS / UNKNOWN / FAIL，只有 PASS 算通过
             return (True, "") if result == "PASS" else (False, "验证码不正确或已过期")
+        except SmsConfigError:
+            raise
         except Exception as exc:  # noqa: BLE001
             log.exception("短信认证核验异常")
             return False, "核验服务暂时不可用"
@@ -239,3 +254,31 @@ def reset_provider() -> None:
     """测试用：清掉缓存，便于切换配置。"""
     global _provider
     _provider = None
+
+
+def describe_config() -> tuple[bool, list[str], bool]:
+    """启动自检：不建连接、不发请求，只回答「通道能不能用」。
+
+    返回 (凭据是否齐全, 缺哪些配置项, SDK 是否已安装)。
+    只在 SMS_PROVIDER=dypns 时有意义；console 模式恒为 (True, [], True)。
+    """
+    if config.SMS_PROVIDER != "dypns":
+        return True, [], True
+
+    missing = [
+        k
+        for k, v in {
+            "ALIBABA_CLOUD_ACCESS_KEY_ID": config.ALIBABA_CLOUD_ACCESS_KEY_ID,
+            "ALIBABA_CLOUD_ACCESS_KEY_SECRET": config.ALIBABA_CLOUD_ACCESS_KEY_SECRET,
+            "SMS_SIGN_NAME": config.SMS_SIGN_NAME,
+            "SMS_TEMPLATE_CODE": config.SMS_TEMPLATE_CODE,
+        }.items()
+        if not str(v).strip()
+    ]
+    try:
+        import importlib.util
+
+        sdk_ok = importlib.util.find_spec("alibabacloud_dypnsapi20170525") is not None
+    except (ImportError, ValueError):
+        sdk_ok = False
+    return (not missing), missing, sdk_ok

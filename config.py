@@ -102,6 +102,18 @@ CHUNK_THRESHOLD = float(os.getenv("CHUNK_THRESHOLD", "0.40"))
 GRAPH_MAX_RESULTS = int(os.getenv("GRAPH_MAX_RESULTS", "8"))
 
 # ============================================================
+# 子图可视化（/chat 返回图结构 + /kg/subgraph 探索）
+# ============================================================
+# 一次返回给前端画图的规模上限。图再大，屏幕上也是一团毛线球，
+# 与其让它画满 300 个点，不如截断并标 truncated。
+SUBGRAPH_MAX_NODES = int(os.getenv("SUBGRAPH_MAX_NODES", "40"))
+SUBGRAPH_MAX_EDGES = int(os.getenv("SUBGRAPH_MAX_EDGES", "60"))
+# 两食材之间找关系时的最大跳数（Neo4j shortestPath 上限，别开太大）
+SUBGRAPH_MAX_HOPS = int(os.getenv("SUBGRAPH_MAX_HOPS", "3"))
+# depth=2 时最多再展开几个一跳食材（控制组合爆炸）
+SUBGRAPH_DEPTH2_SEEDS = int(os.getenv("SUBGRAPH_DEPTH2_SEEDS", "4"))
+
+# ============================================================
 # 证据策略
 # ============================================================
 # strict    = guideline, measured
@@ -276,3 +288,9 @@ TRUSTED_EVIDENCE_LEVEL = os.getenv("TRUSTED_EVIDENCE_LEVEL", "B")
 INCLUDE_PROVISIONAL = os.getenv("INCLUDE_PROVISIONAL", "true").lower() == "true"
 
 DISCLAIMER = os.getenv("DISCLAIMER", _DEFAULT_DISCLAIMER)
+
+LOG_DIR = os.getenv("LOG_DIR", "./logs")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_ROTATION_WHEN = os.getenv("LOG_WHEN", "midnight")
+LOG_ROTATION_INTERVAL = int(os.getenv("LOG_INTERVAL", "1"))
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "14"))

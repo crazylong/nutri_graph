@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import Any
 
 import config
 from kg.query import GraphQuery, detect_intent, plan_queries
 from kg.normalize import EntityLinker, get_alias_store, normalize_text
-from graph.boundary import parse_profile_from_answer
+from graph.boundary import mentions_health_constraint, parse_profile_from_answer
 
 log = logging.getLogger("graph.nodes")
 
@@ -209,7 +210,19 @@ def graph_query_node(state: dict) -> dict:
             include_provisional=config.INCLUDE_PROVISIONAL,
         )
         for r in rows:
+            # 打上来源锚点：一句话里可能有多个食材（「西红柿和牛肉能一起吃吗」），
+            # 前端画子图时要知道这条边挂在哪个食材上。
             r["intent"] = intent
+            r["_src_cid"] = plan["canonical_id"]
+            r["_src_label"] = plan["label"]
+            r["_src_name"] = next(
+                (
+                    (e.get("matched_alias") or e.get("name"))
+                    for e in (state.get("_entities") or [])
+                    if e.get("canonical_id") == plan["canonical_id"]
+                ),
+                plan["canonical_id"],
+            )
             results.append(r)
             lv = r.get("elevel", "")
             evidence_counts[lv] = evidence_counts.get(lv, 0) + 1
@@ -398,7 +411,7 @@ def _complete_from_prompt(prompt: str, note: str = "", degraded: bool = False) -
     from llm import LLMUnavailableError, invoke_model
 
     try:
-        resp = invoke_model(prompt)
+        resp = invoke_model(prompt, enable_thinking=False)
     except LLMUnavailableError as exc:
         log.warning("模型池不可用，降级作答：%s", exc)
         return {
@@ -436,18 +449,35 @@ def _dummy_answer(ctx: str) -> str:
     return f"（占位回答）基于图谱事实：{first}。请配置 DASHSCOPE_API_KEY 后获得完整回答。"
 
 
-def _get_llm():
-    """模型池的回退链（LangChain 原生 `with_fallbacks`），供非 Agent 场景使用。
-
-    主回答链路走的是 Agent + `wrap_call_model` 中间件（见 generate_node）；
-    这里留给只需要一个「能 invoke 的模型」的地方，例如画像抽取。
-    未配置 DASHSCOPE_API_KEY 时返回 None。
-    """
+def _profile_llm():
+    """画像抽取用的回退链。未配置 key 时返回 None，调用方跳过。"""
     if not config.DASHSCOPE_API_KEY:
         return None
     from llm import pool_chain
 
-    return pool_chain()
+    return pool_chain(enable_thinking=False)
+
+
+def _write_profile(user_id: str, question: str, answer: str) -> None:
+    """后台抽过敏 / 慢病 / 忌口。失败只记日志，不影响已经返回的回答。"""
+    try:
+        from memory.long_term import UserProfile
+
+        dialogue = f"用户：{question}\n助手：{answer}"
+        updates = parse_profile_from_answer(dialogue, _profile_llm())
+        if updates:
+            UserProfile().update(user_id, **updates)
+    except Exception as exc:  # noqa: BLE001 —— 画像是附加写入，不能回头影响问答
+        log.warning("画像抽取失败：%s", exc)
+
+
+def _defer_profile(user_id: str, question: str, answer: str) -> None:
+    threading.Thread(
+        target=_write_profile,
+        args=(user_id, question, answer),
+        daemon=True,
+        name="profile-extract",
+    ).start()
 
 
 # ============================================================
@@ -458,7 +488,6 @@ def memory_write_node(state: dict) -> dict:
         return {}
     try:
         from memory.short_term import ShortTermMemory
-        from memory.long_term import UserProfile
 
         user_id = state.get("user_id", "anonymous")
         session_id = state.get("session_id")
@@ -469,12 +498,11 @@ def memory_write_node(state: dict) -> dict:
         stm = ShortTermMemory()
         stm.save_round(session_id, state["question"], state.get("answer", ""))
 
-        # 画像增量抽取（有 LLM 时）
-        dialogue = f"用户：{state['question']}\n助手：{state.get('answer', '')}"
-        updates = parse_profile_from_answer(dialogue, _get_llm())
-        if updates:
-            up = UserProfile()
-            up.update(user_id, **updates)
+        # 画像要再打一次模型，而且不进当前这轮回答。放在请求里等，
+        # 有图事实时用户会把这次耗时和生成叠在一起。没提到约束就直接跳过。
+        question = state.get("question") or ""
+        if config.DASHSCOPE_API_KEY and mentions_health_constraint(question):
+            _defer_profile(user_id, question, state.get("answer", ""))
         return {"session_id": session_id}
     except Exception as e:  # noqa: BLE001 —— 记忆失败不阻断主流程
         log.warning("memory_write 失败：%s", e)

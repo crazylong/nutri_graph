@@ -12,7 +12,7 @@ import threading
 from langchain_core.messages import AIMessage
 
 from llm.middleware import wrap_call_model
-from llm.router import primary_model
+from llm.router import override_enable_thinking, primary_model
 
 log = logging.getLogger("llm.agent")
 
@@ -36,10 +36,15 @@ def get_model_agent():
     return _agent
 
 
-def invoke_model(prompt: str, *, agent=None) -> AIMessage:
-    """一次模型调用：走中间件，自动选模型 / 换模型。返回最后一条 AIMessage。"""
+def invoke_model(prompt: str, *, agent=None, enable_thinking: bool | None = None) -> AIMessage:
+    """一次模型调用：走中间件，自动选模型 / 换模型。返回最后一条 AIMessage。
+
+    enable_thinking=False 让混合思考模型直接出正文。问答接地生成用这个，
+    否则推理会把 max_tokens 花完，中间件再放大预算重试一次。
+    """
     runner = agent or get_model_agent()
-    result = runner.invoke({"messages": [{"role": "user", "content": prompt}]})
+    with override_enable_thinking(enable_thinking):
+        result = runner.invoke({"messages": [{"role": "user", "content": prompt}]})
     messages = result.get("messages") or []
     if not messages:
         raise RuntimeError("Agent 未返回任何消息")

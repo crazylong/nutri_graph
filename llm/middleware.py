@@ -30,6 +30,7 @@ from llm.router import (
     _no_candidate_error,
     _status_brief,
     chat_model,
+    current_enable_thinking,
     fallback_spec,
     get_router,
     in_pool,
@@ -121,6 +122,10 @@ class _Plan:
         params = dict(self.params)
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
+        # invoke_model(..., enable_thinking=False) 时关掉混合思考，避免推理占满预算再重试一次
+        thinking = current_enable_thinking()
+        if thinking is not None:
+            params["enable_thinking"] = thinking
         return chat_model(spec, **params)
 
     def budget(self, spec: ModelSpec) -> int:
