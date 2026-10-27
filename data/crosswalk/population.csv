@@ -1,0 +1,16 @@
+﻿canonical_id,name,kind
+POP_00001,孕妇,group
+POP_00002,婴幼儿,group
+POP_00003,老年人,group
+POP_00004,痛风患者,disease
+POP_00005,糖尿病患者,disease
+POP_00006,高血压患者,disease
+POP_00007,肾功能不全者,disease
+POP_00008,服用他汀类药物者,disease
+POP_00009,脾胃虚寒者,disease
+POP_00010,乳糖不耐受者,group
+POP_00011,术后恢复期患者,disease
+POP_00012,贫血人群,disease
+POP_00013,备孕女性,group
+POP_00014,哺乳期女性,group
+POP_00015,儿童,group

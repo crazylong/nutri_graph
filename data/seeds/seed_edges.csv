@@ -1,0 +1,59 @@
+﻿# nutri_graph 种子关系边（人工标注 evidence）
+# 列：src_cid,rel,dst_cid,evidence_type,evidence_level,claim_text,source_title,source_publisher,source_year
+# 用途：Phase 1 直接 MERGE 进主图；同时是 Ragas 评估集的 ground truth。
+# 证据等级：A 指南/共识 | B 实测/研究 | C 典籍/目录 | D 民间/未验证
+
+src_cid,rel,dst_cid,evidence_type,evidence_level,claim_text,source_title,source_publisher,source_year
+# ===== 含有营养素（B 级，实测）=====
+ING_00001,CONTAINS_NUTRIENT,NUT_00016,measured,B,西红柿富含番茄红素,中国食物成分表,中国疾病预防控制中心,2018
+ING_00001,CONTAINS_NUTRIENT,NUT_00001,measured,B,西红柿含维生素C,中国食物成分表,中国疾病预防控制中心,2018
+ING_00002,CONTAINS_NUTRIENT,NUT_00007,measured,B,菠菜含铁,中国食物成分表,中国疾病预防控制中心,2018
+ING_00002,CONTAINS_NUTRIENT,NUT_00004,measured,B,菠菜含叶酸,中国食物成分表,中国疾病预防控制中心,2018
+ING_00003,CONTAINS_NUTRIENT,NUT_00006,measured,B,豆腐含钙,中国食物成分表,中国疾病预防控制中心,2018
+ING_00003,CONTAINS_NUTRIENT,NUT_00012,measured,B,豆腐含优质蛋白,中国食物成分表,中国疾病预防控制中心,2018
+ING_00005,CONTAINS_NUTRIENT,NUT_00019,measured,B,海鲜含嘌呤,中国食物成分表,中国疾病预防控制中心,2018
+ING_00010,CONTAINS_NUTRIENT,NUT_00015,measured,B,枸杞含胡萝卜素,中国食物成分表,中国疾病预防控制中心,2018
+ING_00021,CONTAINS_NUTRIENT,NUT_00018,measured,B,核桃含ω-3脂肪酸,中国食物成分表,中国疾病预防控制中心,2018
+ING_00026,CONTAINS_NUTRIENT,NUT_00007,measured,B,猪肝含血红素铁,中国食物成分表,中国疾病预防控制中心,2018
+ING_00027,CONTAINS_NUTRIENT,NUT_00006,measured,B,牛奶含钙,中国食物成分表,中国疾病预防控制中心,2018
+ING_00048,CONTAINS_NUTRIENT,NUT_00018,measured,B,三文鱼含ω-3脂肪酸,中国食物成分表,中国疾病预防控制中心,2018
+
+# ===== 推荐搭配（A/B 级）=====
+ING_00001,RECOMMEND_PAIR,ING_00045,guideline,A,西红柿搭配鸡蛋营养互补,中国居民膳食指南,中国营养学会,2022
+ING_00002,RECOMMEND_PAIR,ING_00026,guideline,B,菠菜配猪肝促进铁吸收,中国居民膳食指南,中国营养学会,2022
+ING_00003,RECOMMEND_PAIR,ING_00001,guideline,B,豆腐配西红柿清淡补钙,中国居民膳食指南,中国营养学会,2022
+ING_00007,RECOMMEND_PAIR,ING_00011,traditional,C,生姜配红枣温中散寒,中华药膳,中华中医药学会,2019
+ING_00008,RECOMMEND_PAIR,ING_00009,traditional,C,绿豆配薏米清热利湿,中华药膳,中华中医药学会,2019
+ING_00010,RECOMMEND_PAIR,ING_00025,traditional,C,枸杞配菊花养肝明目,中华药膳,中华中医药学会,2019
+
+# ===== 不宜同食（D 级民间说法 + C 级典籍）=====
+ING_00002,INCOMPATIBLE_WITH,ING_00003,anecdotal,D,菠菜豆腐不能同吃,网络食物相克传言,民间流传,
+ING_00031,INCOMPATIBLE_WITH,ING_00006,traditional,C,冬瓜与虾同食易致寒凉,中华药膳,中华中医药学会,2019
+ING_00007,INCOMPATIBLE_WITH,ING_00030,traditional,C,生姜配苦瓜性味相冲,中华药膳,中华中医药学会,2019
+
+# ===== 人群禁忌（A/B 级，医学有据）=====
+ING_00005,CONTRA_POPULATION,POP_00004,guideline,A,痛风患者慎食高嘌呤海鲜,中国高尿酸血症与痛风诊疗指南,中华医学会,2020
+ING_00026,CONTRA_POPULATION,POP_00004,guideline,A,痛风患者慎食动物内脏,中国高尿酸血症与痛风诊疗指南,中华医学会,2020
+ING_00004,CONTRA_POPULATION,POP_00008,guideline,A,服用他汀者慎食西柚,美国FDA药物相互作用警示,FDA,2012
+ING_00005,CONTRA_POPULATION,POP_00001,guideline,A,孕妇慎食易过敏海鲜,中国居民膳食指南,中国营养学会,2022
+ING_00035,CONTRA_POPULATION,POP_00005,guideline,B,糖尿病患者控制香蕉摄入,中国居民膳食指南,中国营养学会,2022
+ING_00006,CONTRA_POPULATION,POP_00007,guideline,B,肾功能不全者控制虾摄入,中国居民膳食指南,中国营养学会,2022
+ING_00030,CONTRA_POPULATION,POP_00009,traditional,C,脾胃虚寒者慎食苦瓜,中华药膳,中华中医药学会,2019
+ING_00008,CONTRA_POPULATION,POP_00009,traditional,C,脾胃虚寒者慎食绿豆,中华药膳,中华中医药学会,2019
+
+# ===== 禁忌事项（A 级，药物相互作用）=====
+ING_00004,CONTRA_ITEM,TAB_00001,guideline,A,西柚影响他汀类药物代谢,美国FDA药物相互作用警示,FDA,2012
+ING_00002,CONTRA_ITEM,TAB_00002,measured,B,菠菜富含维生素K影响华法林药效,临床药理学研究,PubMed,
+ING_00017,CONTRA_ITEM,TAB_00008,measured,B,洋葱可能影响甲状腺药物吸收,临床药理学研究,PubMed,
+
+# ===== 替代食材（B/C 级）=====
+ING_00027,SUBSTITUTE_FOR,ING_00003,guideline,B,乳糖不耐受者可用豆腐替代牛奶补钙,中国居民膳食指南,中国营养学会,2022
+ING_00022,SUBSTITUTE_FOR,ING_00027,traditional,C,黑芝麻可辅助补钙替代牛奶,中华药膳,中华中医药学会,2019
+ING_00040,SUBSTITUTE_FOR,ING_00041,traditional,C,小米可替代燕麦作为温和主食,中华药膳,中华中医药学会,2019
+
+# ===== 关联症状（辅助边，Population → Symptom）=====
+POP_00004,HAS_SYMPTOM,SYM_00011,guideline,A,痛风表现为关节红肿热痛,中国高尿酸血症与痛风诊疗指南,中华医学会,2020
+POP_00005,HAS_SYMPTOM,SYM_00010,guideline,A,糖尿病表现为血糖升高,中国糖尿病防治指南,中华医学会,2020
+POP_00006,HAS_SYMPTOM,SYM_00009,guideline,A,高血压表现为血压升高,中国高血压防治指南,中华医学会,2018
+POP_00009,HAS_SYMPTOM,SYM_00012,traditional,C,脾胃虚寒表现为胃寒,中华药膳,中华中医药学会,2019
+POP_00012,HAS_SYMPTOM,SYM_00004,guideline,B,贫血表现为面色苍白,中国居民膳食指南,中国营养学会,2022

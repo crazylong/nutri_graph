@@ -1,0 +1,11 @@
+﻿canonical_id,name,taboo_type
+TAB_00001,他汀类药物,drug
+TAB_00002,华法林,drug
+TAB_00003,高尿酸血症,disease_state
+TAB_00004,急性痛风发作期,disease_state
+TAB_00005,空腹大量食用,cooking
+TAB_00006,生豆浆,extreme_pair
+TAB_00007,酒精,extreme_pair
+TAB_00008,甲状腺药物,drug
+TAB_00009,抗凝药物,drug
+TAB_00010,生食,cooking

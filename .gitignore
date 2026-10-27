@@ -1,0 +1,49 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Environment（含密钥，绝不入库）
+.env
+.env.example
+.cursor/rules/server-access.mdc
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# 运行时数据
+data/candidates/
+*.log
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+.workbuddy
+.cursor
+
+logs/
+data/*.sqlite
+*.pyc
+ui/node_modules/
+ui/.tanstack/tmp/
+ui/tsconfig.tsbuildinfo
+ui/.output/
+*.iml
+.tmp_fetch_url_workspace
+
+# LLM 模型池运行状态（额度冷却记账）
+data/llm_pool_state.json

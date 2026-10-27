@@ -1,0 +1,24 @@
+[Unit]
+Description=nutri_graph 食疗问答 API (uvicorn)
+Documentation=file:///opt/code/nutri_graph/README.md
+# 依赖 PostgreSQL / Neo4j 容器；docker 起来后再启动，避免开机时连不上库
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/code/nutri_graph
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# 只监听回环：对外一律走 nginx（TLS、限流、静态页都在那一层）
+# --proxy-headers 让 request.client.host 取到 nginx 传的真实 IP ——
+#   短信频控和日志都依赖它，否则所有请求看起来都来自 127.0.0.1
+# --workers 1：别名缓存、模型池状态都在进程内，多 worker 会各存一份
+ExecStart=/opt/envs/nutri/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8810 --proxy-headers --forwarded-allow-ips=127.0.0.1 --workers 1
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>食疗问答 · nutri_graph</title>
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+
+<!-- 登录闸门：AUTH_REQUIRED=true 时 /chat 只认已登录用户 -->
+<div class="gate" id="gate" hidden>
+  <form class="gate-card" id="login-form" autocomplete="on">
+    <div class="gate-brand">
+      <span class="mark">食</span>
+      <div>
+        <h2>登录后使用</h2>
+        <p>手机号验证码登录，未注册会自动建号</p>
+      </div>
+    </div>
+
+    <label class="field">
+      <span>手机号</span>
+      <input id="phone" type="tel" inputmode="numeric" maxlength="11"
+             placeholder="11 位手机号" required>
+    </label>
+
+    <label class="field">
+      <span>验证码</span>
+      <div class="code-row">
+        <input id="code" type="text" inputmode="numeric" maxlength="8"
+               placeholder="6 位数字" required>
+        <button type="button" class="ghost-btn" id="send-code">获取验证码</button>
+      </div>
+    </label>
+
+    <label class="field" id="captcha-field" hidden>
+      <span>图形验证码</span>
+      <div class="captcha-row">
+        <img id="captcha-img" alt="图形验证码" title="点击刷新">
+        <input id="captcha-answer" type="text" inputmode="numeric" maxlength="4"
+               placeholder="答案" autocomplete="off">
+      </div>
+    </label>
+
+    <p class="gate-msg" id="gate-msg" role="status"></p>
+
+    <button type="submit" class="primary-btn" id="login-btn">登录</button>
+
+    <p class="gate-hint">
+      演示环境未接真实短信通道，验证码只写在服务器日志里：
+      <code>journalctl -u nutri-graph | grep 验证码 | tail -1</code>
+    </p>
+  </form>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot" id="health-dot" title="检查中"></span>
+    <div>
+      <h1>食疗问答</h1>
+      <p>基于食疗知识图谱的回答 · 每条结论都能追到出处</p>
+    </div>
+  </div>
+  <nav class="topnav">
+    <a href="/docs" target="_blank" rel="noopener">接口文档</a>
+    <a href="/health" target="_blank" rel="noopener">健康状态</a>
+    <span class="who" id="who" hidden>
+      <span id="who-mask"></span>
+      <button class="link-btn" id="logout">退出</button>
+    </span>
+  </nav>
+</header>
+
+<main id="thread" class="thread" aria-live="polite">
+  <section class="empty" id="empty">
+    <h2>问点具体的，我按图谱里的证据回答</h2>
+    <p class="muted">
+      我不会凭常识推测。图谱里没有的食材，我会明确告诉你「暂未收录」并登记，
+      而不是编一个看起来合理的答案。
+    </p>
+    <div class="samples">
+      <button class="sample">痛风能吃海鲜吗？</button>
+      <button class="sample">西红柿和什么一起吃好？</button>
+      <button class="sample">黑豆含什么营养？</button>
+    </div>
+  </section>
+</main>
+
+<footer class="composer">
+  <div class="composer-inner">
+    <textarea id="input" rows="1" placeholder="例如：痛风能吃海鲜吗？" autocomplete="off"></textarea>
+    <button id="send" class="send" aria-label="发送">发送</button>
+  </div>
+  <p class="hint">Enter 发送 · Shift + Enter 换行 · 回答仅供健康科普参考，不能替代医生诊断</p>
+</footer>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

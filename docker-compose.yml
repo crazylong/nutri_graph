@@ -1,0 +1,168 @@
+# nutri_graph 本地开发依赖
+# 用法：docker compose up -d
+# 服务：Neo4j 5 / Milvus 2.4(etcd+minio) / PostgreSQL 16(pgvector) / Langfuse 3 自托管(clickhouse+postgres)
+
+name: nutri_graph
+
+services:
+  # ---------- Neo4j 图谱 ----------
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: nutri_neo4j
+    environment:
+      NEO4J_AUTH: neo4j/nutrigraph-dev
+      NEO4J_dbms_memory_heap_initial__size: 512m
+      NEO4J_dbms_memory_heap_max__size: 1G
+      NEO4J_dbms_memory_pagecache_size: 512m
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "nutrigraph-dev", "RETURN 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # ---------- Milvus 向量库 ----------
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    container_name: nutri_etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: nutri_minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /minio_data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus:
+    image: milvusdb/milvus:v2.4.17
+    container_name: nutri_milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    depends_on:
+      - etcd
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ---------- PostgreSQL（候选表 + 记忆 + pgvector）----------
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nutri_postgres
+    environment:
+      POSTGRES_USER: nutri
+      POSTGRES_PASSWORD: nutri
+      POSTGRES_DB: nutri_graph
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nutri -d nutri_graph"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------- Langfuse 自托管（依赖 clickhouse + 独立 pg）----------
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: nutri_langfuse_clickhouse
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  langfuse-postgres:
+    image: postgres:16-alpine
+    container_name: nutri_langfuse_postgres
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  langfuse:
+    image: langfuse/langfuse:3
+    container_name: nutri_langfuse
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
+      CLICKHOUSE_URL: http://clickhouse:clickhouse@langfuse-clickhouse:8123
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: "dev-secret-change-me-please-1234567890"
+      SALT: "dev-salt"
+      ENCRYPTION_KEY: "dev-encryption-key-00000000000000000000000000000000"
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  neo4j_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_postgres_data:
