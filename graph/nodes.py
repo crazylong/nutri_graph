@@ -2,7 +2,7 @@
 graph/nodes.py —— LangGraph 节点实现
 
 节点链：
-  guard → normalize → link → route → graph_query / vector_fallback → assemble → generate → verify → memory_write
+  guard → normalize → link → route → graph_query / vector_fallback → assemble → generate → memory_write
 """
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import time
 from typing import Any
 
 import config
-from kg.query import GraphQuery, detect_intent
-from kg.normalize import EntityLinker, AliasStore, normalize_text
+from kg.query import GraphQuery, detect_intent, plan_queries
+from kg.normalize import EntityLinker, get_alias_store, normalize_text
 from graph.boundary import parse_profile_from_answer
 
 log = logging.getLogger("graph.nodes")
@@ -54,21 +54,37 @@ def normalize_node(state: dict) -> dict:
 def link_node(state: dict) -> dict:
     from kg.request import extract_candidates
 
-    alias_store = AliasStore(config.PG_DSN)
+    alias_store = get_alias_store()
     linker = EntityLinker(alias_store, vector_search=_entity_vector_search)
 
-    # 旧实现对整句做 exact_lookup —— 而整句永远不等于某个别名，
-    # 所以对自然语言提问只有「用户只打一个词」时才会命中。
-    # 现在改成字典最长匹配，把句子里出现的所有别名都切出来。
+    # 整句走字典最长匹配。没被别名盖住的片段再逐个走模糊和向量，
+    # 这两级在 EntityLinker.link 里，阈值读 ENTITY_LINK_THRESHOLD。
     norm = state.get("_normalized") or state.get("question", "")
     result = linker.link_question(norm)
 
     candidates = extract_candidates(result.residual)
-    near = linker.near_misses(candidates) if candidates else []
+    entities = list(result.entities)
+    unresolved: list[str] = []
+    for term in candidates:
+        extra = linker.link(term)
+        if extra.entities:
+            entities.extend(extra.entities)
+        else:
+            unresolved.append(term)
 
+    seen: set[tuple[str, str]] = set()
+    deduped = []
+    for entity in entities:
+        key = (entity.label, entity.canonical_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entity)
+
+    near = linker.near_misses(unresolved) if unresolved else []
     return {
-        "_entities": [e.__dict__ for e in result.entities],
-        "_unresolved": candidates,
+        "_entities": [e.__dict__ for e in deduped],
+        "_unresolved": unresolved,
         "_near_misses": near,
         "_link_residual": result.residual,
     }
@@ -143,18 +159,16 @@ def route_node(state: dict) -> dict:
 
 
 def route_after_link(state: dict) -> str:
-    """只有链接到**食材**才值得走图查询。
+    """有能落地的 (意图, 节点) 才走图。
 
-    三种情况分开：
-      有食材实体         → graph_query
-      没食材但有未收录词 → uncatalogued（登记 + 明确回话）
-      只有症状/人群、或什么都没命中 → vector_fallback（宁可降级也不硬猜）
-
-    注意「只有症状/人群」这一支：graph_query 内部本来就会跳过非 Ingredient 实体，
-    走进去也只会拿到空结果，不如直接降级，省一次 Neo4j 往返。
+    食材问法要有 Ingredient，症状问法要有 Symptom。
+    对得上 → graph_query
+    对不上、但有未收录词 → uncatalogued
+    其余 → vector_fallback
     """
     entities = state.get("_entities") or []
-    if any(e.get("label") == "Ingredient" for e in entities):
+    intents = state.get("_intents") or ["pair"]
+    if plan_queries(entities, intents):
         return "graph_query"
     if state.get("_unresolved"):
         return "uncatalogued"
@@ -179,23 +193,26 @@ def graph_query_node(state: dict) -> dict:
             profile = {}
     allergens = list(profile.get("allergies", [])) + list(profile.get("avoid_list", []))
 
-    for entity in state.get("_entities", []):
-        if entity["label"] != "Ingredient":
-            continue
-        for intent in state.get("_intents", []):
-            allowed = [x.strip() for x in config.EVIDENCE_POLICY_MAP.get(intent, "").split(",") if x.strip()]
-            rows = _query.run(
-                intent,
-                entity["canonical_id"],
-                allowed,
-                allergens,
-                include_provisional=config.INCLUDE_PROVISIONAL,
-            )
-            for r in rows:
-                r["intent"] = intent
-                results.append(r)
-                lv = r.get("elevel", "")
-                evidence_counts[lv] = evidence_counts.get(lv, 0) + 1
+    plans = plan_queries(state.get("_entities") or [], state.get("_intents") or [])
+    for plan in plans:
+        intent = plan["intent"]
+        allowed = [
+            x.strip()
+            for x in config.EVIDENCE_POLICY_MAP.get(intent, "").split(",")
+            if x.strip()
+        ]
+        rows = _query.run(
+            intent,
+            plan["canonical_id"],
+            allowed,
+            allergens,
+            include_provisional=config.INCLUDE_PROVISIONAL,
+        )
+        for r in rows:
+            r["intent"] = intent
+            results.append(r)
+            lv = r.get("elevel", "")
+            evidence_counts[lv] = evidence_counts.get(lv, 0) + 1
 
     graph_hit = bool(results)
     provisional_count = sum(1 for r in results if r.get("provisional"))
@@ -205,6 +222,7 @@ def graph_query_node(state: dict) -> dict:
         "_degraded": False,
         "_evidence_counts": evidence_counts,
         "_provisional_count": provisional_count,
+        "_user_profile": profile,
     }
 
 
@@ -272,6 +290,7 @@ def assemble_node(state: dict) -> dict:
 def generate_node(state: dict) -> dict:
     from graph.boundary import (
         classify_tier,
+        build_document_prompt,
         build_grounded_prompt,
         NONE_ANSWER,
         WEAK_DISCLAIMER,
@@ -322,14 +341,27 @@ def generate_node(state: dict) -> dict:
     if tier == "weak":
         note = PROVISIONAL_DISCLAIMER if all_provisional else WEAK_DISCLAIMER
 
-    # 降级路径：只有向量，没有图事实 → 视为「无确切依据」，除非向量里有明确答案
-    if not facts and vector_results:
-        tier = "none"
-        facts = [{"text": c["text"], "etype": "doc", "elevel": "C", "name": c.get("doc_id", "文档")} for c in vector_results]
-
     profile = state.get("_user_profile") or {}
+    history = _recent_dialogue(state)
+
+    # 图 0 命中、向量已高于阈值：按文档转述，并标明不是图谱结论。
+    # 低于阈值的块在 vector_fallback 里已经丢掉，到不了这里。
+    if not facts and vector_results:
+        if not config.DASHSCOPE_API_KEY:
+            first = vector_results[0].get("text", "")
+            return {
+                "answer": f"（占位回答）检索到文档，不是图谱结论：{first}",
+                "basis": [],
+                "gaps": [],
+                "confidence": 0.4,
+                "_degraded": True,
+            }
+        prompt = build_document_prompt(state["question"], vector_results, profile, history)
+        return _complete_from_prompt(prompt, degraded=True)
+
     prompt = build_grounded_prompt(
-        state["question"], facts, tier, profile, provisional=all_provisional
+        state["question"], facts, tier, profile,
+        provisional=all_provisional, history=history,
     )
 
     if not config.DASHSCOPE_API_KEY:
@@ -342,18 +374,37 @@ def generate_node(state: dict) -> dict:
             "gaps": [],
             "confidence": 0.5,
         }
+    return _complete_from_prompt(prompt, note=note)
+
+
+def _recent_dialogue(state: dict) -> str:
+    """当前会话最近几轮。没有 session_id 时不读，避免把别人的会话拉进来。"""
+    if not config.MEMORY_ENABLED:
+        return ""
+    session_id = state.get("session_id")
+    if not session_id:
+        return ""
+    try:
+        from memory.short_term import ShortTermMemory
+
+        return ShortTermMemory().load_context(session_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("读取短期记忆失败：%s", exc)
+        return ""
+
+
+def _complete_from_prompt(prompt: str, note: str = "", degraded: bool = False) -> dict:
+    """调模型池，把 JSON 回答拆开。池全不可用时明确说答不了。"""
     from llm import LLMUnavailableError, invoke_model
 
     try:
-        # 走 Agent + wrap_call_model 中间件：动态选模型，额度用尽自动切下一个
         resp = invoke_model(prompt)
     except LLMUnavailableError as exc:
-        # 池内模型 + 兜底模型全都不行：宁可明确说「暂时答不了」，也不要编答案
         log.warning("模型池不可用，降级作答：%s", exc)
         return {
             "answer": (
                 "当前模型暂时都不可用（额度用尽或全部冷却中），无法生成回答。"
-                "图谱检索结果已就绪，稍后重试即可；如情况紧急请直接就医。"
+                "检索结果已就绪，稍后重试即可；如情况紧急请直接就医。"
             ),
             "basis": [],
             "gaps": ["模型暂时全部不可用"],
@@ -366,15 +417,17 @@ def generate_node(state: dict) -> dict:
     except (json.JSONDecodeError, ValueError):
         obj = {"answer": content}
     answer = obj.get("answer", "")
-    # 弱证据档：追加标注（单源补录用另一句，别把实测数据说成「民间说法」）
     if note and note not in answer:
         answer = note + "\n" + answer
-    return {
+    out = {
         "answer": answer,
         "basis": obj.get("basis", []),
         "gaps": obj.get("gaps", []),
         "confidence": float(obj.get("confidence", 0.5)),
     }
+    if degraded:
+        out["_degraded"] = True
+    return out
 
 
 def _dummy_answer(ctx: str) -> str:
@@ -395,22 +448,6 @@ def _get_llm():
     from llm import pool_chain
 
     return pool_chain()
-
-
-# ============================================================
-# verify —— 自检：答案断言能否在图事实里找到出处
-# ============================================================
-def verify_node(state: dict) -> dict:
-    # 简化自检：如果答案非空且上下文为空，说明是弃答，无需校验
-    ctx = state.get("_memory_context", "")
-    ans = state.get("answer", "")
-    if not ans:
-        return {}
-    if not ctx:
-        return {}
-    # 校验：答案里的关键名词是否出现在上下文（粗粒度接地检查）
-    # 生产版应做断言级拆分，这里做演示级检查
-    return {}
 
 
 # ============================================================
@@ -438,6 +475,7 @@ def memory_write_node(state: dict) -> dict:
         if updates:
             up = UserProfile()
             up.update(user_id, **updates)
+        return {"session_id": session_id}
     except Exception as e:  # noqa: BLE001 —— 记忆失败不阻断主流程
         log.warning("memory_write 失败：%s", e)
-    return {}
+        return {}

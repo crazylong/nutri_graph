@@ -62,10 +62,15 @@ class EvidenceLevel(str, Enum):
 # 各意图默认允许的 evidence_type（与 config.EVIDENCE_POLICY_MAP 对齐）
 DEFAULT_POLICY: dict[str, list[str]] = {
     "pair": [EvidenceType.GUIDELINE, EvidenceType.MEASURED, EvidenceType.TRADITIONAL],
+    "incompatible": [
+        EvidenceType.GUIDELINE, EvidenceType.MEASURED,
+        EvidenceType.TRADITIONAL, EvidenceType.ANECDOTAL,
+    ],
     "contra_population": [EvidenceType.GUIDELINE, EvidenceType.MEASURED],
     "contra_item": [EvidenceType.GUIDELINE, EvidenceType.MEASURED],
     "nutrition": [EvidenceType.GUIDELINE, EvidenceType.MEASURED],
     "substitute": [EvidenceType.GUIDELINE, EvidenceType.MEASURED, EvidenceType.TRADITIONAL],
+    "symptom_remedy": [EvidenceType.GUIDELINE, EvidenceType.MEASURED],
 }
 
 

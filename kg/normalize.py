@@ -25,9 +25,24 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
+import config
 from kg.textsim import char_similarity
 
 log = logging.getLogger("kg.normalize")
+
+_alias_store: "AliasStore | None" = None
+
+
+def get_alias_store() -> "AliasStore":
+    """进程内一份别名表。改完 dict_alias 后要重启，或把 `_alias_store` 置空。
+
+    问答链路以前每次请求 new 一个 AliasStore，缓存跟着请求丢掉，
+    全表别名每问都重读。测试会在每条用例前清掉这份缓存。
+    """
+    global _alias_store
+    if _alias_store is None:
+        _alias_store = AliasStore(config.PG_DSN)
+    return _alias_store
 
 # 模糊匹配的可用区间：低于这个值基本是两回事
 NEAR_MISS_MIN_SIM = 0.62
@@ -313,7 +328,7 @@ class EntityLinker:
 
         if self.vector_search is not None:
             vec = self.vector_search(norm, top_k=3)
-            if vec and vec[0]["score"] >= 0.82:
+            if vec and vec[0]["score"] >= config.ENTITY_LINK_THRESHOLD:
                 best = vec[0]
                 result.entities.append(
                     LinkedEntity(

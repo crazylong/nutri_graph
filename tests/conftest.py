@@ -64,6 +64,15 @@ _MEMORY_DDL = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _fresh_alias_cache():
+    """别名表是进程级单例。每条用例开始前丢掉，避免上一条插进 dict_alias 的行被缓存挡住。"""
+    import kg.normalize as normalize
+
+    normalize._alias_store = None
+    yield
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _destructive_guard():
     """拦住「对着有数据的库跑测试」这件事。

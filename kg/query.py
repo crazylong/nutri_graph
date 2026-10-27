@@ -72,25 +72,55 @@ TEMPLATES: dict[str, str] = {
                coalesce(r.provisional, false) AS provisional
         ORDER BY r.evidence_level LIMIT $k
     """,
-    # 反向查：什么食材对某症状有帮助（先通过症状找人群，再找食材，用于「上火了吃什么」）
+    # 食材↔食材的民间不宜同食。和 RECOMMEND_PAIR 分开查，
+    # 「能一起吃吗」才会同时看到推荐边和相克边。
+    "incompatible": f"""
+        MATCH (a:Ingredient {{canonical_id: $cid}})-[r:INCOMPATIBLE_WITH]-(b:Ingredient)
+        WHERE r.evidence_type IN $allowed AND NOT b.canonical_name IN $allergens
+              {_PROV}
+        RETURN b.canonical_id AS cid, b.canonical_name AS name,
+               r.evidence_type AS etype, r.evidence_level AS elevel,
+               r.claim_text AS claim, r.reason AS effect,
+               coalesce(r.provisional, false) AS provisional
+        ORDER BY r.evidence_level, r.confidence DESC LIMIT $k
+    """,
+    # 症状 → 关联人群 → 这些人该避开的食材。
+    # $cid 必须是 Symptom。图里没有「对症推荐吃什么」的边，
+    # 能回答的是禁忌，不是食疗方。
     "symptom_remedy": f"""
-        MATCH (s:Symptom {{canonical_id: $cid}})
-        OPTIONAL MATCH (s)<-[:HAS_SYMPTOM]-(p:Population)
-        OPTIONAL MATCH (p)<-[r:CONTRA_POPULATION]-(avoid:Ingredient)
-        WHERE $include_provisional OR coalesce(r.provisional, false) = false
-        WITH s, p, collect(DISTINCT avoid.canonical_name) AS avoid_names
-        RETURN s.name AS symptom, p.name AS population, avoid_names
+        MATCH (s:Symptom {{canonical_id: $cid}})<-[:HAS_SYMPTOM]-(p:Population)
+              <-[r:CONTRA_POPULATION]-(avoid:Ingredient)
+        WHERE r.evidence_type IN $allowed {_PROV}
+        RETURN avoid.canonical_id AS cid, avoid.canonical_name AS name,
+               p.name AS population, s.name AS symptom,
+               r.evidence_type AS etype, r.evidence_level AS elevel,
+               r.claim_text AS claim,
+               coalesce(r.provisional, false) AS provisional
+        ORDER BY r.evidence_level LIMIT $k
     """,
 }
 
 # 意图路由关键词（与 msb_assistant 的 KEYWORD_TABLE 风格一致）
 INTENT_KEYWORDS: dict[str, list[str]] = {
     "pair": ["搭配", "配", "一起吃", "一起吃好不好", "相配", "适合一起", "配什么"],
+    # 「一起吃好」是在问搭配，不要算进不宜同食。只认明确的相克问法。
+    "incompatible": ["不宜同食", "不能同吃", "相克", "能一起吃", "一起吃吗", "同食"],
     "contra_population": ["忌口", "不能吃", "慎食", "少吃", "禁忌", "痛风", "糖尿", "孕妇", "高血压", "肾"],
     "contra_item": ["药物", "药", "相互作用", "同服", "影响药效", "他汀", "华法林"],
     "nutrition": ["营养", "含什么", "成分", "维生素", "钙", "铁", "蛋白质", "营养素", "多少"],
     "substitute": ["替代", "代替", "换什么", "不吃这个吃什么", "平替"],
     "symptom_remedy": ["上火", "犯困", "失眠", "便秘", "咳嗽", "吃什么好", "调理", "症状", "食补", "补"],
+}
+
+# 意图锚定在哪类节点上。症状问法不能拿食材 id 去套 Symptom 模板。
+INTENT_ANCHOR: dict[str, str] = {
+    "pair": "Ingredient",
+    "incompatible": "Ingredient",
+    "contra_population": "Ingredient",
+    "contra_item": "Ingredient",
+    "nutrition": "Ingredient",
+    "substitute": "Ingredient",
+    "symptom_remedy": "Symptom",
 }
 
 
@@ -140,3 +170,30 @@ def detect_intent(question: str) -> list[str]:
         if any(kw in question for kw in kws):
             hits.append(intent)
     return hits or ["pair"]  # 默认走搭配
+
+
+def plan_queries(entities: list[dict[str, Any]], intents: list[str]) -> list[dict[str, str]]:
+    """决定这次要跑哪些 (意图, 节点)。
+
+    每个意图只绑一种节点：食材问法用 Ingredient 的 canonical_id，
+    症状问法用 Symptom 的 canonical_id。对不上的组合直接跳过，
+    避免拿食材 id 去匹配症状节点、查空还当成「图谱没有这条边」。
+    """
+    plans: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for intent in intents:
+        anchor = INTENT_ANCHOR.get(intent)
+        if not anchor or intent not in TEMPLATES:
+            continue
+        for entity in entities:
+            if entity.get("label") != anchor:
+                continue
+            cid = entity.get("canonical_id") or ""
+            if not cid:
+                continue
+            key = (intent, cid)
+            if key in seen:
+                continue
+            seen.add(key)
+            plans.append({"intent": intent, "canonical_id": cid, "label": anchor})
+    return plans

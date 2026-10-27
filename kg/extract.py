@@ -1,6 +1,10 @@
 """
 kg/extract.py —— LLM 抽取三元组（落到候选表，不直写主图）
 
+当前没有调用方。问答和补录都不走这里。
+活的入图路径是 USDA bundle → kg_candidate → kg.merge。
+在接上抽取任务之前，不要把它算进 FR-02 的已落地范围。
+
 设计要点：
   - 强制 JSON Schema 输出，pydantic 校验，结构不合法的直接丢弃
   - 每个三元组必须带 source_locator（原文定位），无引用 = 视为幻觉，丢弃

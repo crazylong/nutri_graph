@@ -20,7 +20,7 @@ router = APIRouter(tags=["chat"])
 
 @router.post("/chat")
 def chat(payload: dict, who: dict | None = Depends(get_principal)):
-    """走 LangGraph 检索链路：guard → link → route → graph/vector → assemble → generate → verify。"""
+    """走 LangGraph 检索链路：guard → link → route → graph/vector → assemble → generate。"""
     question = payload.get("question", "")
     session_id = payload.get("session_id")
 
@@ -63,5 +63,6 @@ def chat(payload: dict, who: dict | None = Depends(get_principal)):
         # 未收录时把登记结果结构化带出去：前端要显示编号和进度，
         # 不能让人从「已记录（编号 #170）」这句话里正则抠数字。
         "food_requests": result.get("_food_requests", []),
+        "session_id": result.get("session_id") or session_id,
         "disclaimer": config.DISCLAIMER,
     }

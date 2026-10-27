@@ -1,7 +1,8 @@
 """
 memory/long_term.py —— 长期记忆（PostgreSQL + pgvector）
 
-长期 = 用户画像（硬约束，进 Cypher 过滤）+ memory_fact 语义召回。
+UserProfile 已接入问答：过敏和忌口会进 Cypher 过滤。
+LongTermMemory（memory_fact 的向量召回）还没有调用方，问答链路不读不写它。
 """
 from __future__ import annotations
 
@@ -57,7 +58,7 @@ class UserProfile:
 
 
 class LongTermMemory:
-    """长期事实语义召回（pgvector）。"""
+    """memory_fact 语义召回。问答链路未使用。"""
 
     def __init__(self, dsn: str = None, embedding_fn=None):
         self.dsn = dsn or config.PG_DSN

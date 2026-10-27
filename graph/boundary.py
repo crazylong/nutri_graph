@@ -52,6 +52,7 @@ def build_grounded_prompt(
     tier: str,
     profile: dict[str, Any] | None = None,
     provisional: bool = False,
+    history: str = "",
 ) -> str:
     """构造严格接地 prompt。
 
@@ -86,13 +87,48 @@ def build_grounded_prompt(
             "它们是实测值，问题在于验证程度，不在于证据类型。"
         )
 
+    history_block = f"近期对话（只用于理解指代，不能当成图谱事实）：\n{history}\n\n" if history else ""
+
     return (
         "你是食疗养生助手，只能依据下面给出的图谱事实回答，禁止补充任何图外知识或常识推断。\n"
         f"{tier_rule}\n"
         f"{allergy_note}\n\n"
+        f"{history_block}"
         f"图检索事实：\n{ctx}\n\n"
         f"用户问题：{question}\n\n"
         '请以 JSON 返回：{"answer":"...","basis":["引用的关键事实"],"gaps":["未覆盖的点"],"confidence":0.0-1.0}'
+    )
+
+
+def build_document_prompt(
+    question: str,
+    chunks: list[dict[str, Any]],
+    profile: dict[str, Any] | None = None,
+    history: str = "",
+) -> str:
+    """图谱 0 命中、向量高于阈值时用。片段必须标明是文档，不是图谱关系。"""
+    lines = []
+    for c in chunks:
+        text = c.get("text") or ""
+        doc_id = c.get("doc_id") or "文档"
+        lines.append(f"[文档/{doc_id}] {text}")
+    ctx = "\n".join(lines)
+    allergy_note = ""
+    if profile and (profile.get("allergies") or profile.get("avoid_list")):
+        allergy_note = (
+            f"用户已知过敏/忌口：{profile.get('allergies', []) + profile.get('avoid_list', [])}。"
+            "转述时排除这些。\n"
+        )
+    history_block = f"近期对话（只用于理解指代）：\n{history}\n\n" if history else ""
+    return (
+        "你是食疗养生助手。下面是向量检索到的文档片段，不是知识图谱里的关系事实。\n"
+        "只能转述片段里写明的内容，并在回答里说明「来自文档检索，不是图谱结论」。\n"
+        "片段里没有直接答案时，回答「没有找到确切依据」，禁止用常识补充。\n"
+        f"{allergy_note}\n"
+        f"{history_block}"
+        f"文档片段：\n{ctx}\n\n"
+        f"用户问题：{question}\n\n"
+        '请以 JSON 返回：{"answer":"...","basis":["引用的片段"],"gaps":["未覆盖的点"],"confidence":0.0-1.0}'
     )
 
 

@@ -33,10 +33,16 @@ _UNAUTHORIZED = {"WWW-Authenticate": "Bearer"}
 
 
 def client_ip(request: Request) -> str:
-    """取真实客户端 IP：反代后面取 X-Forwarded-For 第一跳。"""
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
+    """取真实客户端 IP。
+
+    nginx 把 `$remote_addr` 写进 X-Real-IP，会覆盖客户端自带的同名头。
+    X-Forwarded-For 第一段是客户端自己塞的（`proxy_add_x_forwarded_for`
+    把它留在最左边），不能拿来做频控。
+    没有 X-Real-IP 时用连接对端。生产由 nginx 反代，直连只发生在本机。
+    """
+    real = request.headers.get("x-real-ip", "").strip()
+    if real:
+        return real
     return request.client.host if request.client else ""
 
 

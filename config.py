@@ -112,10 +112,15 @@ DEFAULT_EVIDENCE_POLICY = os.getenv("DEFAULT_EVIDENCE_POLICY", "balanced")
 # 各意图默认允许的 evidence_type（字符串逗号分隔）
 EVIDENCE_POLICY_MAP = {
     "pair": os.getenv("EVIDENCE_PAIR", "guideline,measured,traditional"),
+    # 不宜同食的主体是民间说法，默认把 anecdotal 放进来，靠证据等级降档，而不是直接滤掉。
+    "incompatible": os.getenv(
+        "EVIDENCE_INCOMPATIBLE", "guideline,measured,traditional,anecdotal"
+    ),
     "contra_population": os.getenv("EVIDENCE_CONTRA_POP", "guideline,measured"),
     "contra_item": os.getenv("EVIDENCE_CONTRA_ITEM", "guideline,measured"),
     "nutrition": os.getenv("EVIDENCE_NUTRITION", "guideline,measured"),
     "substitute": os.getenv("EVIDENCE_SUBSTITUTE", "guideline,measured,traditional"),
+    "symptom_remedy": os.getenv("EVIDENCE_SYMPTOM", "guideline,measured"),
 }
 
 # ============================================================

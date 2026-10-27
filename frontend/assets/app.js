@@ -31,6 +31,17 @@ const LEVEL_LABEL = { A: '指南/共识', B: '实测/研究', C: '典籍/单一�
 const K_AT = 'ng.at';
 const K_RT = 'ng.rt';
 const K_MASK = 'ng.mask';
+const K_SID = 'ng.sid';
+const K_DEV = 'ng.device';
+
+function deviceFp() {
+  let v = localStorage.getItem(K_DEV);
+  if (!v) {
+    v = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+    localStorage.setItem(K_DEV, v);
+  }
+  return v;
+}
 
 const tokens = {
   get access() { return localStorage.getItem(K_AT) || ''; },
@@ -40,7 +51,7 @@ const tokens = {
     if (body.refresh_token) localStorage.setItem(K_RT, body.refresh_token);
   },
   clear() {
-    [K_AT, K_RT, K_MASK].forEach((k) => localStorage.removeItem(k));
+    [K_AT, K_RT, K_MASK, K_SID].forEach((k) => localStorage.removeItem(k));
   }
 };
 
@@ -149,7 +160,7 @@ async function doSendCode() {
   gateMsg.className = 'gate-msg';
 
   try {
-    const payload = { phone };
+    const payload = { phone, device_fp: deviceFp() };
     if (captchaId) {
       payload.captcha_id = captchaId;
       payload.captcha_answer = captchaAnswer.value.trim();
@@ -417,16 +428,20 @@ async function ask(question) {
   const pending = addPending();
 
   try {
+    const payload = { question: q };
+    const sid = localStorage.getItem(K_SID);
+    if (sid) payload.session_id = sid;
     const r = await api('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: q })
+      body: JSON.stringify(payload)
     });
     let body = null;
     try { body = await r.json(); } catch { /* 可能是 nginx 的 429 页 */ }
 
     pending.remove();
     if (r.ok && body) {
+      if (body.session_id) localStorage.setItem(K_SID, body.session_id);
       thread.appendChild(renderAnswer(body));
     } else if (r.status === 401) {
       showGate('请先登录。');
