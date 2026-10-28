@@ -55,6 +55,11 @@ mkdir -p "$WEB_ROOT/assets"
 install -m 0644 "$APP_DIR/frontend/index.html" "$WEB_ROOT/index.html"
 install -m 0644 "$APP_DIR/frontend/assets/styles.css" "$WEB_ROOT/assets/styles.css"
 install -m 0644 "$APP_DIR/frontend/assets/app.js" "$WEB_ROOT/assets/app.js"
+if [ -d "$APP_DIR/admin-web/dist" ]; then
+  mkdir -p "$WEB_ROOT/console"
+  cp -a "$APP_DIR/admin-web/dist/." "$WEB_ROOT/console/"
+  echo "  管理后台 $WEB_ROOT/console"
+fi
 chown -R root:root "$WEB_ROOT"
 find "$WEB_ROOT" -type d -exec chmod 755 {} \;
 find "$WEB_ROOT" -type f -exec chmod 644 {} \;

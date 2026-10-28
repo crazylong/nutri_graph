@@ -66,6 +66,9 @@ class TokenRequest(BaseModel):
     anon_token: str = Field(
         "", description="未登录期间拿到的匿名令牌；带上则把匿名数据归并到本账号"
     )
+    console: bool = Field(
+        False, description="管理后台登录。为真时把该账号设为 admin，方便演示"
+    )
 
 
 class RefreshRequest(BaseModel):
@@ -126,6 +129,15 @@ def _upsert_user(phone: str) -> dict:
             detail={"code": "account_locked", "message": "账号已被限制，请联系管理员"},
         )
     return {"user_id": str(user_id), "role": role, "phone_mask": mask}
+
+
+def _grant_admin(user_id: str) -> None:
+    """管理后台登录直接给 admin。问答登录不走这里。"""
+    with psycopg.connect(config.PG_DSN) as conn:
+        conn.execute(
+            "UPDATE app_user SET role = 'admin' WHERE user_id = %s",
+            (user_id,),
+        )
 
 
 def _record_consent(user_id: str, version: str, ip: str) -> None:
@@ -288,6 +300,9 @@ def exchange_token(req: TokenRequest, request: Request):
         )
 
     user = _upsert_user(phone)
+    if req.console:
+        _grant_admin(user["user_id"])
+        user["role"] = "admin"
     _record_consent(user["user_id"], req.policy_version, ip)
     tokens = issue_tokens(user["user_id"], user["role"])
 

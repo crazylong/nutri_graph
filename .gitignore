@@ -38,6 +38,7 @@ logs/
 data/*.sqlite
 *.pyc
 ui/node_modules/
+admin-web/node_modules/
 ui/.tanstack/tmp/
 ui/tsconfig.tsbuildinfo
 ui/.output/

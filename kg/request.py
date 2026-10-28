@@ -186,6 +186,7 @@ def register(
     who: str = "anonymous",
     source: str = "chat",
     near_misses: list[dict] | None = None,
+    skip_user_limit: bool = False,
 ) -> RegisterResult:
     """把一次「未收录」请求落到正确的出口。任何异常都不能让 /chat 500。"""
     if not config.FOOD_REQUEST_ENABLED:
@@ -261,7 +262,12 @@ def register(
             ).fetchone()
 
             if exists is None:
-                if _count_today(conn, "requested_by = %s", (who,)) >= config.FOOD_REQUEST_DAILY_LIMIT_PER_USER:
+                # 管理员登记传 skip_user_limit，不占这个人的每日额度。全站上限仍生效。
+                if (
+                    not skip_user_limit
+                    and _count_today(conn, "requested_by = %s", (who,))
+                    >= config.FOOD_REQUEST_DAILY_LIMIT_PER_USER
+                ):
                     return RegisterResult(
                         action="rate_limited", term=term, method=method, food_key=term,
                         code="user_daily_limit",

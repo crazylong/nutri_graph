@@ -125,7 +125,7 @@ def list_candidates(
         cur = conn.cursor()
         cur.execute(
             "SELECT id, batch_id, src_id, rel, dst_id, dst_name, claim_text, "
-            "evidence_type, evidence_level, confidence, source_locator "
+            "evidence_type, evidence_level, confidence, source_locator, sources "
             "FROM kg_candidate WHERE status = %s ORDER BY id LIMIT %s",
             (status, limit),
         )
@@ -255,3 +255,176 @@ def reject_bundle(bundle_id: int, req: RejectRequest, admin: dict = Depends(requ
                 "message": msg,
             },
         ) from exc
+
+
+# ============================================================
+# 未收录食物登记（kg_ingredient_request）与疑似别名
+# ============================================================
+_REQUEST_MISSING = "kg_ingredient_request 表不存在，请先运行 python -m scripts.migrate"
+_ALIAS_CANDIDATE_MISSING = "dict_alias_candidate 表不存在，请先运行 python -m scripts.migrate"
+
+_REQUEST_STATUSES = "queued|fetching|fetched|pending_review|approved|rejected"
+
+
+class ManualFoodRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+
+
+def _require_named_table(conn, name: str, message: str) -> None:
+    if not _table_exists(conn, name):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "table_missing", "message": message},
+        )
+
+
+def _like(keyword: str) -> str:
+    escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _rows(cur) -> list[dict]:
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+@router.get("/kg/requests")
+def list_food_requests(
+    status: str = Query("", pattern=f"^({_REQUEST_STATUSES})?$"),
+    keyword: str = Query("", max_length=80),
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """未收录食物。count 是符合筛选的总条数，不是本页条数。"""
+    where = ["TRUE"]
+    args: list = []
+    if status:
+        where.append("status = %s")
+        args.append(status)
+    if keyword.strip():
+        where.append(
+            "(food_key ILIKE %s ESCAPE '\\' OR raw_mention ILIKE %s ESCAPE '\\' "
+            "OR normalized ILIKE %s ESCAPE '\\')"
+        )
+        pat = _like(keyword.strip())
+        args.extend([pat, pat, pat])
+    clause = " AND ".join(where)
+    with psycopg.connect(config.PG_DSN) as conn:
+        _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
+        cur = conn.cursor()
+        cur.execute(f"SELECT count(*) FROM kg_ingredient_request WHERE {clause}", args)
+        total = int(cur.fetchone()[0])
+        cur.execute(
+            "SELECT id, food_key, raw_mention, normalized, requested_by, source, "
+            "hit_count, status, reject_reason, last_requested_at, created_at "
+            f"FROM kg_ingredient_request WHERE {clause} "
+            "ORDER BY last_requested_at DESC, id DESC LIMIT %s OFFSET %s",
+            [*args, limit, offset],
+        )
+        items = _rows(cur)
+    return {"count": total, "limit": limit, "offset": offset, "items": items}
+
+
+@router.get("/kg/requests/{request_id}")
+def get_food_request(request_id: int):
+    with psycopg.connect(config.PG_DSN) as conn:
+        _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, food_key, raw_mention, normalized, requested_by, source, "
+            "hit_count, status, reject_reason, last_requested_at, created_at "
+            "FROM kg_ingredient_request WHERE id = %s",
+            (request_id,),
+        )
+        rows = _rows(cur)
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": "登记不存在"},
+        )
+    return rows[0]
+
+
+@router.post("/kg/requests/{request_id}/reject")
+def reject_food_request(request_id: int, req: RejectRequest):
+    """驳回未收录登记。理由可以空，空也写成空字符串。"""
+    with psycopg.connect(config.PG_DSN) as conn:
+        _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE kg_ingredient_request SET status = 'rejected', reject_reason = %s "
+            "WHERE id = %s RETURNING id, status, reject_reason",
+            (req.reason, request_id),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": "登记不存在"},
+        )
+    return {"id": row[0], "status": row[1], "reject_reason": row[2]}
+
+
+@router.post("/kg/requests")
+def create_food_request(req: ManualFoodRequest, admin: dict = Depends(require_admin)):
+    """管理员手工登记。不占个人日限额，仍受全站日上限约束。"""
+    from kg.request import register
+
+    result = register(
+        req.name,
+        who=admin["user_id"],
+        source="admin",
+        skip_user_limit=True,
+    )
+    if result.code == "global_daily_limit" or result.action == "rate_limited":
+        raise HTTPException(
+            status_code=429,
+            detail={"code": result.code or "rate_limited", "message": result.message},
+        )
+    if result.action == "not_ready":
+        raise HTTPException(
+            status_code=503,
+            detail={"code": result.code or "not_ready", "message": result.message},
+        )
+    if not result.registered:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": result.code or result.action,
+                "message": result.message,
+            },
+        )
+    return {
+        "id": result.request_id,
+        "food_key": result.food_key,
+        "status": result.status,
+        "hit_count": result.hit_count,
+        "action": result.action,
+        "source": "admin",
+        "message": result.message,
+    }
+
+
+@router.get("/kg/alias-candidates")
+def list_alias_candidates(
+    status: str = Query("", pattern="^(pending|approved|rejected)?$"),
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """疑似别名只读。status 以库里的当前值为准，补录合并可能已把它改成 approved。"""
+    where = "TRUE" if not status else "status = %s"
+    args: list = [status] if status else []
+    with psycopg.connect(config.PG_DSN) as conn:
+        _require_named_table(conn, "dict_alias_candidate", _ALIAS_CANDIDATE_MISSING)
+        cur = conn.cursor()
+        cur.execute(f"SELECT count(*) FROM dict_alias_candidate WHERE {where}", args)
+        total = int(cur.fetchone()[0])
+        cur.execute(
+            "SELECT id, entity_type, alias, alias_norm, suggested_canonical_id, "
+            "status, created_at "
+            f"FROM dict_alias_candidate WHERE {where} "
+            "ORDER BY id DESC LIMIT %s OFFSET %s",
+            [*args, limit, offset],
+        )
+        items = _rows(cur)
+    return {"count": total, "limit": limit, "offset": offset, "items": items}
