@@ -13,8 +13,37 @@ import psycopg
 import config
 
 
+_ARRAY_FIELDS = ("allergies", "conditions", "avoid_list", "hobbies", "symptoms")
+_SCALAR_FIELDS = ("diet_style", "age", "gender", "height_cm", "weight_kg")
+
+
+def _empty_profile() -> dict[str, Any]:
+    return {
+        "allergies": [],
+        "conditions": [],
+        "diet_style": "",
+        "avoid_list": [],
+        "age": None,
+        "gender": "",
+        "height_cm": None,
+        "weight_kg": None,
+        "hobbies": [],
+        "symptoms": [],
+    }
+
+
+def _clean_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip() and item.strip() not in out:
+            out.append(item.strip())
+    return out
+
+
 class UserProfile:
-    """用户画像：过敏 / 慢病 / 饮食偏好 / 忌口。硬约束。"""
+    """用户画像：过敏 / 慢病 / 忌口，加上人口学与症状。"""
 
     def __init__(self, dsn: str = None):
         self.dsn = dsn or config.PG_DSN
@@ -23,38 +52,68 @@ class UserProfile:
         with psycopg.connect(self.dsn) as conn:
             cur = conn.cursor()
             cur.execute(
-                "SELECT allergies, conditions, diet_style, avoid_list FROM user_profile "
-                "WHERE user_id = %s",
+                "SELECT allergies, conditions, diet_style, avoid_list, "
+                "age, gender, height_cm, weight_kg, hobbies, symptoms "
+                "FROM user_profile WHERE user_id = %s",
                 (user_id,),
             )
             row = cur.fetchone()
         if not row:
-            return {"allergies": [], "conditions": [], "diet_style": "", "avoid_list": []}
+            return _empty_profile()
         return {
             "allergies": row[0] or [],
             "conditions": row[1] or [],
             "diet_style": row[2] or "",
             "avoid_list": row[3] or [],
+            "age": row[4],
+            "gender": row[5] or "",
+            "height_cm": row[6],
+            "weight_kg": row[7],
+            "hobbies": row[8] or [],
+            "symptoms": row[9] or [],
         }
 
     def update(self, user_id: str, **fields: Any) -> None:
-        allowed = {"allergies", "conditions", "diet_style", "avoid_list"}
-        sets = {k: v for k, v in fields.items() if k in allowed}
-        if not sets:
+        """本轮写入：标量非空才覆盖，数组只做并集，空数组不写。"""
+        scalars: dict[str, Any] = {}
+        arrays: dict[str, list[str]] = {}
+        for key, value in fields.items():
+            if key in _ARRAY_FIELDS:
+                cleaned = _clean_list(value)
+                if cleaned:
+                    arrays[key] = cleaned
+            elif key in _SCALAR_FIELDS and _scalar_present(value):
+                scalars[key] = value
+        if not scalars and not arrays:
             return
         # DO UPDATE SET 用 EXCLUDED. 引用新值，避免重复占位符：
-        # 否则 INSERT 用 N 个、UPDATE 又用 N 个，占位符数 = 2N+1，参数只有 N+1，
-        # 报「7 placeholders but 4 parameters」。
-        cols = ", ".join(sets)
-        updates = ", ".join(f"{k} = EXCLUDED.{k}" for k in sets)
-        vals = list(sets.values())
+        # 否则 INSERT 用 N 个、UPDATE 又用 N 个，占位符数 = 2N+1，参数只有 N+1。
+        cols = [*scalars.keys(), *arrays.keys()]
+        params: list[Any] = [user_id, *scalars.values(), *arrays.values()]
+        assignments = [f"{col} = EXCLUDED.{col}" for col in scalars]
+        assignments.extend(
+            f"{col} = ARRAY(SELECT DISTINCT unnest("
+            f"COALESCE(user_profile.{col}, '{{}}') || COALESCE(EXCLUDED.{col}, '{{}}')))"
+            for col in arrays
+        )
+        placeholders = ", ".join(["%s"] * len(cols))
+        sql = (
+            f"INSERT INTO user_profile (user_id, {', '.join(cols)}) "
+            f"VALUES (%s, {placeholders}) "
+            f"ON CONFLICT (user_id) DO UPDATE SET {', '.join(assignments)}, updated_at = now()"
+        )
         with psycopg.connect(self.dsn) as conn:
-            conn.execute(
-                f"INSERT INTO user_profile (user_id, {cols}) VALUES (%s, "
-                + ", ".join(["%s"] * len(sets))
-                + f") ON CONFLICT (user_id) DO UPDATE SET {updates}, updated_at = now()",
-                (user_id, *vals),
-            )
+            conn.execute(sql, params)
+
+
+def _scalar_present(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (int, float)) and value == 0:
+        return False
+    return True
 
 
 class LongTermMemory:

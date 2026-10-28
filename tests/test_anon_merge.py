@@ -111,6 +111,43 @@ def test_invalid_anon_token_does_not_block_login(client):
     assert tokens["merged"]["skipped"] is True
 
 
+def test_merge_keeps_target_scalars_and_unions_new_arrays(client, monkeypatch):
+    """两边都有的身高体重留在目标账号；目标没有的标量用匿名侧；数组并集。"""
+    monkeypatch.setattr(config, "SMS_INTERVAL_S", 0)
+    tokens = login(client)
+    real_id = tokens["user"]["user_id"]
+    with psycopg.connect(config.PG_DSN) as conn:
+        conn.execute(
+            """
+            INSERT INTO user_profile (user_id, age, weight_kg, hobbies)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE
+              SET age = EXCLUDED.age, weight_kg = EXCLUDED.weight_kg, hobbies = EXCLUDED.hobbies
+            """,
+            (real_id, 40, 70, ["阅读"]),
+        )
+    anon = client.post("/auth/anon").json()
+    with psycopg.connect(config.PG_DSN) as conn:
+        conn.execute(
+            """
+            INSERT INTO user_profile (user_id, age, weight_kg, height_cm, hobbies, symptoms)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (anon["anon_id"], 18, 50, 170, ["跑步"], ["失眠"]),
+        )
+    login(client, phone=tokens["_phone"], anon_token=anon["anon_token"])
+    age, weight, height, hobbies, symptoms = _q(
+        "SELECT age, weight_kg, height_cm, hobbies, symptoms "
+        "FROM user_profile WHERE user_id = %s",
+        (real_id,),
+    )[0]
+    assert age == 40
+    assert weight == 70
+    assert height == 170
+    assert set(hobbies) == {"阅读", "跑步"}
+    assert "失眠" in symptoms
+
+
 def test_merge_rejects_non_anon_id(client):
     """只认服务端签发的 anon: 前缀，防止把别人的 user_id 当匿名身份合并进来。"""
     from memory.anonymous_merge import merge_anon_into_user

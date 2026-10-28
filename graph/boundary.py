@@ -69,9 +69,7 @@ def build_grounded_prompt(
         lines.append(f"[{etype}/{elevel}] {name}：{claim}")
     ctx = "\n".join(lines)
 
-    allergy_note = ""
-    if profile and (profile.get("allergies") or profile.get("avoid_list")):
-        allergy_note = f"\n用户已知过敏/忌口：{profile.get('allergies', []) + profile.get('avoid_list', [])}。所有建议必须排除这些。"
+    allergy_note = profile_constraint_note(profile)
 
     tier_rule = {
         TIER_STRONG: "存在权威依据（A/B 级），可以正常回答，并在结尾列出依据。",
@@ -113,12 +111,7 @@ def build_document_prompt(
         doc_id = c.get("doc_id") or "文档"
         lines.append(f"[文档/{doc_id}] {text}")
     ctx = "\n".join(lines)
-    allergy_note = ""
-    if profile and (profile.get("allergies") or profile.get("avoid_list")):
-        allergy_note = (
-            f"用户已知过敏/忌口：{profile.get('allergies', []) + profile.get('avoid_list', [])}。"
-            "转述时排除这些。\n"
-        )
+    allergy_note = profile_constraint_note(profile, document=True)
     history_block = f"近期对话（只用于理解指代）：\n{history}\n\n" if history else ""
     return (
         "你是食疗养生助手。下面是向量检索到的文档片段，不是知识图谱里的关系事实。\n"
@@ -132,13 +125,26 @@ def build_document_prompt(
     )
 
 
-# 用户原话里出现这些，才可能是在透露自己的饮食约束。
+# 用户原话里出现这些，才可能是在透露自己的情况。
 # 没有就不要再打一次模型：搭配、营养这类问法占了绝大多数请求。
+# 不用「男 / 女 / 喜欢」：会打中「男人补锌」「我喜欢吃番茄」，而且后句不一定是在说自己。
 _PROFILE_CUES = (
     "过敏", "忌口", "忌食", "不吃", "不能吃",
     "痛风", "糖尿", "高血压", "低血压", "肾病",
     "孕妇", "怀孕", "哺乳", "慢病", "慢性",
+    "岁", "身高", "体重", "公斤", "斤", "厘米",
+    "失眠", "生理期", "月经", "爱好",
 )
+
+# 这些不是慢性病。模型若把它们放进 conditions，归到 symptoms。
+_STATE_WORDS = ("失眠", "生理期", "月经", "怀孕", "孕期", "孕妇")
+
+_GENDER_MAP = {
+    "男": "男", "男性": "男", "男生": "男",
+    "女": "女", "女性": "女", "女生": "女",
+}
+
+_LIST_FIELDS = ("allergies", "conditions", "avoid_list", "hobbies", "symptoms")
 
 
 def mentions_health_constraint(text: str) -> bool:
@@ -148,15 +154,161 @@ def mentions_health_constraint(text: str) -> bool:
 
 # 画像抽取 prompt（after_model 钩子用）
 PROFILE_EXTRACT_PROMPT = (
-    "从下面这轮对话中判断用户是否透露了饮食相关的健康约束。\n"
-    "仅当用户明确表达时抽取，禁止推断。\n"
-    "输出 JSON：{\"allergies\":[], \"conditions\":[], \"avoid_list\":[]}\n"
-    "allergies=食物过敏；conditions=慢性病（如痛风、糖尿病、高血压）；avoid_list=主动忌口/不吃的东西。\n\n"
+    "从下面这轮对话中判断用户是否在说自己的情况。\n"
+    "仅当用户明确在说自己时抽取，禁止推断。"
+    "禁止把问句里的他人（如「男人补锌」「女生经期」）写成用户本人。\n"
+    "输出 JSON："
+    "{\"allergies\":[], \"conditions\":[], \"avoid_list\":[], "
+    "\"hobbies\":[], \"symptoms\":[], "
+    "\"age\":null, \"gender\":\"\", \"height_cm\":null, \"weight_kg\":null, \"weight_jin\":null}\n"
+    "allergies=食物过敏；conditions=慢性病（痛风、糖尿病、高血压），"
+    "不要把失眠、生理期、怀孕放进 conditions；"
+    "avoid_list=主动忌口；hobbies=爱好；"
+    "symptoms=症状或生理状态（失眠、生理期、怀孕）。\n"
+    "age 为整数岁。gender 只填「男」或「女」。"
+    "身高一律换算成厘米写入 height_cm。"
+    "体重优先写入 weight_kg（公斤）。用户说的是斤时，把斤数写入 weight_jin，"
+    "不要把斤数填进 weight_kg。一斤=0.5公斤。\n"
+    "没有提到的字段用空数组、null 或空串，不要编造。\n\n"
     f"对话：{'{dialogue}'}"
 )
 
 
-def parse_profile_from_answer(dialogue: str, llm) -> dict[str, list[str]]:
+def profile_constraint_note(profile: dict[str, Any] | None, *, document: bool = False) -> str:
+    """过敏进提示词；人口学和症状只授权用来收窄建议，不能编造依据。
+
+    爱好只落库，不放进回答提示词。
+    """
+    if not profile:
+        return ""
+    lines: list[str] = []
+    blocked = list(profile.get("allergies") or []) + list(profile.get("avoid_list") or [])
+    if blocked:
+        verb = "转述时排除这些。" if document else "所有建议必须排除这些。"
+        lines.append(f"用户已知过敏/忌口：{blocked}。{verb}")
+    traits: list[str] = []
+    if profile.get("age") not in (None, ""):
+        traits.append(f"{profile['age']}岁")
+    if profile.get("gender"):
+        traits.append(str(profile["gender"]))
+    if profile.get("height_cm") not in (None, ""):
+        traits.append(f"身高{profile['height_cm']}厘米")
+    if profile.get("weight_kg") not in (None, ""):
+        traits.append(f"体重{profile['weight_kg']}公斤")
+    if traits:
+        lines.append("用户本人情况：" + "，".join(traits) + "。")
+    symptoms = profile.get("symptoms") or []
+    if symptoms:
+        lines.append(f"用户提到的症状或生理状态：{symptoms}。")
+    if not lines:
+        return ""
+    lines.append(
+        "年龄、性别、身高、体重和症状只用来缩小建议范围，不能用来编造上面没有的关系或事实。"
+    )
+    return "\n" + "\n".join(lines) + "\n"
+
+
+def normalize_profile_fields(obj: dict[str, Any]) -> dict[str, Any]:
+    """把模型抽出的 JSON 收成可写入的字段。空值不出现在结果里。"""
+    if not isinstance(obj, dict):
+        return {}
+    lists: dict[str, list[str]] = {}
+    for key in _LIST_FIELDS:
+        raw = obj.get(key)
+        if not isinstance(raw, list):
+            continue
+        vals: list[str] = []
+        for item in raw:
+            if isinstance(item, str) and item.strip() and item.strip() not in vals:
+                vals.append(item.strip())
+        if vals:
+            lists[key] = vals
+
+    conditions = lists.get("conditions") or []
+    symptoms = lists.get("symptoms") or []
+    kept: list[str] = []
+    for item in conditions:
+        if any(word in item for word in _STATE_WORDS):
+            if item not in symptoms:
+                symptoms.append(item)
+        else:
+            kept.append(item)
+    if kept:
+        lists["conditions"] = kept
+    elif "conditions" in lists:
+        del lists["conditions"]
+    if symptoms:
+        lists["symptoms"] = symptoms
+
+    out: dict[str, Any] = dict(lists)
+    age = _as_int(obj.get("age"))
+    if age is not None and 1 <= age <= 120:
+        out["age"] = age
+    gender = _GENDER_MAP.get(str(obj.get("gender") or "").strip())
+    if gender:
+        out["gender"] = gender
+    height = _height_cm(obj)
+    if height is not None:
+        out["height_cm"] = height
+    weight = _weight_kg(obj)
+    if weight is not None:
+        out["weight_kg"] = weight
+    return out
+
+
+def _as_number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _as_int(value: Any) -> int | None:
+    if isinstance(value, str):
+        value = value.strip().rstrip("岁")
+    number = _as_number(value)
+    if number is None or not number.is_integer():
+        return None
+    return int(number)
+
+
+def _height_cm(obj: dict[str, Any]) -> float | None:
+    cm = _as_number(obj.get("height_cm"))
+    if cm is None:
+        meters = _as_number(obj.get("height_m"))
+        if meters is not None and meters > 0:
+            cm = meters * 100
+    if cm is None or cm <= 0:
+        return None
+    # 1.65 这种是米，不是厘米。正常身高不会小于 3 厘米。
+    if cm < 3:
+        cm *= 100
+    if cm > 300:
+        return None
+    return round(cm, 1)
+
+
+def _weight_kg(obj: dict[str, Any]) -> float | None:
+    """已经换成公斤的用 weight_kg；只给了斤就按 1 斤 = 0.5 公斤换算。"""
+    kg = _as_number(obj.get("weight_kg"))
+    if kg is not None and kg > 0:
+        return round(kg, 1)
+    jin = _as_number(obj.get("weight_jin"))
+    if jin is not None and jin > 0:
+        return round(jin * 0.5, 1)
+    return None
+
+
+def parse_profile_from_answer(dialogue: str, llm) -> dict[str, Any]:
     """从对话抽取用户画像增量（需 llm 客户端）。"""
     if llm is None:
         return {}
@@ -170,4 +322,4 @@ def parse_profile_from_answer(dialogue: str, llm) -> dict[str, list[str]]:
         obj = json.loads(m.group(0))
     except json.JSONDecodeError:
         return {}
-    return {k: v for k, v in obj.items() if isinstance(v, list)}
+    return normalize_profile_fields(obj)

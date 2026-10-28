@@ -175,3 +175,53 @@ def ingredient_relation(
         "subgraph": g,
         "disclaimer": config.DISCLAIMER,
     }
+
+
+class CompareIn(BaseModel):
+    foods: list[str] = Field(..., min_length=2, max_length=4, description="2~4 个食材名")
+
+
+@router.post("/compare")
+def compare_foods(payload: CompareIn, who: dict | None = Depends(get_principal)):
+    """多个食材（2~4 个）的两两关系合并成一张子图。
+
+    与 /relation 的差别：一次性看多个食材之间「谁和谁有关系」，而不是只看一对。
+    未收录的食材不挡整次请求，而是统一登记（幂等）后放进 missing 列表返回，
+    让前端一次性提示「XX、XX 未收录，已反馈给管理员」。
+    """
+    foods = [f.strip() for f in payload.foods if f and f.strip()]
+    if len(foods) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "bad_params", "message": "至少需要两个食材"},
+        )
+
+    resolved: list[dict] = []
+    missing: list[dict] = []
+    for food in foods:
+        r = sg.resolve(food)
+        if r and r.get("canonical_id"):
+            resolved.append(r)
+        else:
+            # 未收录：登记（幂等），记录供前端一次性汇总提示
+            reg = food_request.register(food, who=_who(who), source="compare")
+            missing.append({"term": food, "registered": reg.registered, "code": reg.code})
+
+    cids = [r["canonical_id"] for r in resolved]
+    g = None
+    if len(cids) >= 2:
+        try:
+            g = sg.compare_many(cids)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("多食材对照失败 %s: %s: %s", cids, type(exc).__name__, exc)
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "graph_unavailable", "message": "图谱暂时连不上，稍后重试。"},
+            ) from exc
+
+    return {
+        "resolved": resolved,
+        "missing": missing,
+        "subgraph": g or {"nodes": [], "edges": [], "meta": {"kind": "compare"}},
+        "disclaimer": config.DISCLAIMER,
+    }

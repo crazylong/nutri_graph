@@ -289,7 +289,13 @@ INCLUDE_PROVISIONAL = os.getenv("INCLUDE_PROVISIONAL", "true").lower() == "true"
 
 DISCLAIMER = os.getenv("DISCLAIMER", _DEFAULT_DISCLAIMER)
 
-LOG_DIR = os.getenv("LOG_DIR", "./logs")
+# ============================================================
+# 日志
+# ============================================================
+# LOG_DIR 默认定位到项目根目录下的 logs/，避免「从哪个目录启动就写到哪」的漂移。
+# 显式配 LOG_DIR 时按配置值走（可用相对路径，但建议绝对路径）。
+_LOG_DIR_DEFAULT = str(Path(__file__).resolve().parent / "logs")
+LOG_DIR = os.getenv("LOG_DIR", _LOG_DIR_DEFAULT)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_ROTATION_WHEN = os.getenv("LOG_WHEN", "midnight")
 LOG_ROTATION_INTERVAL = int(os.getenv("LOG_INTERVAL", "1"))

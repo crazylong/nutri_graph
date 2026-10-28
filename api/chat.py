@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 import config
@@ -36,7 +36,7 @@ def _subgraph(result: dict) -> dict | None:
 def chat(payload: dict, who: dict | None = Depends(get_principal)):
     """走 LangGraph 检索链路：guard → link → route → graph/vector → assemble → generate。"""
     question = payload.get("question", "")
-    session_id = payload.get("session_id")
+    session_id = (payload.get("session_id") or "").strip() or None
 
     who = require_user_when_enforced(who)
     user_id = who["user_id"] if who else payload.get("user_id", "anonymous")
@@ -44,12 +44,31 @@ def chat(payload: dict, who: dict | None = Depends(get_principal)):
     if not question:
         return JSONResponse(status_code=400, content={"error": "question 不能为空"})
 
+    # 先校验归属，再进图。别人的会话不能被读进提示词，也不能被续写。
+    # 不带 session_id 时留给 memory_write 新建，这里不复用旧会话。
+    if session_id is not None:
+        from memory.short_term import ShortTermMemory
+
+        if not ShortTermMemory().owns(user_id, session_id):
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "session_not_found", "message": "会话不存在"},
+            )
+
     # 校验通过后才拉起图谱链路：鉴权失败 / 参数非法的请求不该付出导入与建连成本
     from graph.workflow import get_agent
 
     t0 = time.time()
     agent = get_agent()
-    state = {"question": question, "user_id": user_id, "session_id": session_id}
+    # 前端未传时沿用旧行为（允许抽取）。明确拒绝则只做通用回答，不读不写画像。
+    raw_consent = payload.get("consent", None)
+    consent_profile = True if raw_consent is None else bool(raw_consent)
+    state = {
+        "question": question,
+        "user_id": user_id,
+        "session_id": session_id,
+        "consent_profile": consent_profile,
+    }
 
     from observability.tracing import record_result, trace
 

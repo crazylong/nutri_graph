@@ -12,6 +12,7 @@ from graph.boundary import (
     build_document_prompt,
     build_grounded_prompt,
     mentions_health_constraint,
+    normalize_profile_fields,
 )
 from graph.nodes import (
     _complete_from_prompt,
@@ -19,6 +20,7 @@ from graph.nodes import (
     generate_node,
     memory_write_node,
     route_after_link,
+    route_node,
 )
 from llm.router import thinking_can_be_disabled
 from kg.normalize import EntityLinker, get_alias_store
@@ -152,6 +154,53 @@ def test_vector_hit_is_labeled_as_document_not_graph(monkeypatch):
     assert out["_degraded"] is True
 
 
+def test_prompt_uses_age_and_symptoms_without_inventing():
+    profile = {
+        "age": 35,
+        "gender": "女",
+        "symptoms": ["失眠"],
+        "hobbies": ["跑步"],
+        "allergies": ["花生"],
+    }
+    prompt = build_grounded_prompt(
+        "吃什么",
+        [{"name": "豆腐", "etype": "guide", "elevel": "A", "claim": "含钙"}],
+        "strong",
+        profile=profile,
+    )
+    assert "35岁" in prompt
+    assert "失眠" in prompt
+    assert "花生" in prompt
+    assert "跑步" not in prompt
+    assert "不能用来编造" in prompt
+    doc = build_document_prompt("吃什么", [{"text": "文档", "doc_id": "d"}], profile)
+    assert "失眠" in doc and "跑步" not in doc
+
+
+def test_jin_converts_to_kg_and_empty_fields_drop():
+    out = normalize_profile_fields({
+        "weight_jin": 120,
+        "weight_kg": None,
+        "allergies": [],
+        "conditions": ["痛风", "生理期"],
+        "symptoms": ["失眠"],
+        "gender": "女性",
+        "age": "35",
+        "height_cm": 1.65,
+        "hobbies": ["跑步", ""],
+    })
+    assert out["weight_kg"] == 60.0
+    assert "allergies" not in out
+    assert out["conditions"] == ["痛风"]
+    assert out["symptoms"] == ["失眠", "生理期"]
+    assert out["gender"] == "女"
+    assert out["age"] == 35
+    assert out["height_cm"] == 165.0
+    assert out["hobbies"] == ["跑步"]
+    assert normalize_profile_fields({"gender": "我喜欢吃番茄", "age": None}) == {}
+    assert normalize_profile_fields({"weight_kg": 60, "weight_jin": 120})["weight_kg"] == 60.0
+
+
 def test_prompt_includes_recent_dialogue_as_non_fact():
     prompt = build_grounded_prompt(
         "那能一起吃吗",
@@ -177,11 +226,13 @@ def test_recent_dialogue_reads_the_given_session(monkeypatch):
 
 def test_memory_write_returns_session_id(monkeypatch):
     class FakeMemory:
-        def get_session(self, user_id):
+        def create_session(self, user_id):
+            assert user_id == "u"
             return "sid-1"
 
-        def save_round(self, session_id, question, answer):
+        def save_round(self, session_id, question, answer, card=None):
             assert session_id == "sid-1"
+            assert card["graph_hit"] is False
 
     monkeypatch.setattr(config, "MEMORY_ENABLED", True)
     monkeypatch.setattr("memory.short_term.ShortTermMemory", FakeMemory)
@@ -189,18 +240,39 @@ def test_memory_write_returns_session_id(monkeypatch):
     assert out["session_id"] == "sid-1"
 
 
+def test_memory_write_keeps_explicit_session(monkeypatch):
+    class FakeMemory:
+        def create_session(self, user_id):
+            raise AssertionError("已有会话不应再新建")
+
+        def save_round(self, session_id, question, answer, card=None):
+            assert session_id == "keep"
+
+    monkeypatch.setattr(config, "MEMORY_ENABLED", True)
+    monkeypatch.setattr("memory.short_term.ShortTermMemory", FakeMemory)
+    out = memory_write_node({
+        "question": "q", "answer": "a", "user_id": "u", "session_id": "keep",
+    })
+    assert out["session_id"] == "keep"
+
+
 def test_health_constraint_cues():
     assert mentions_health_constraint("我对花生过敏")
     assert mentions_health_constraint("痛风能吃海鲜吗")
+    assert mentions_health_constraint("我今年35岁")
+    assert mentions_health_constraint("我120斤")
+    assert mentions_health_constraint("我怀孕了")
     assert not mentions_health_constraint("黑豆和什么一起吃")
+    assert not mentions_health_constraint("男人补锌")
+    assert not mentions_health_constraint("我喜欢吃番茄")
 
 
 def test_memory_write_defers_profile_only_when_cued(monkeypatch):
     class FakeMemory:
-        def get_session(self, user_id):
+        def create_session(self, user_id):
             return "sid-1"
 
-        def save_round(self, session_id, question, answer):
+        def save_round(self, session_id, question, answer, card=None):
             return None
 
     deferred = []
@@ -214,6 +286,28 @@ def test_memory_write_defers_profile_only_when_cued(monkeypatch):
 
     memory_write_node({"question": "我对花生过敏", "answer": "先别吃", "user_id": "u"})
     assert deferred == [("u", "我对花生过敏", "先别吃")]
+
+    memory_write_node({
+        "question": "我对花生过敏",
+        "answer": "先别吃",
+        "user_id": "u",
+        "consent_profile": False,
+    })
+    assert deferred == [("u", "我对花生过敏", "先别吃")]
+
+
+def test_denied_consent_does_not_load_profile(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise AssertionError("拒绝收集时不应读画像")
+
+    monkeypatch.setattr("memory.long_term.UserProfile.get", boom)
+    out = route_node({
+        "question": "黑豆怎么吃",
+        "user_id": "u",
+        "consent_profile": False,
+    })
+    assert out["_user_profile"] == {}
+    assert out["_intents"]
 
 
 def test_answer_call_disables_thinking(monkeypatch):

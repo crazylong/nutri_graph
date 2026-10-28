@@ -34,6 +34,7 @@ const K_RT = 'ng.rt';
 const K_MASK = 'ng.mask';
 const K_SID = 'ng.sid';
 const K_DEV = 'ng.device';
+const K_CONSENT = 'ng.consent';   // 敏感个人信息单独同意：'1'=同意 / '0'=拒绝
 
 function deviceFp() {
   let v = localStorage.getItem(K_DEV);
@@ -92,6 +93,7 @@ function showGate(msg) {
   who.hidden = true;
   gateMsg.textContent = msg || '';
   gateMsg.className = 'gate-msg' + (msg ? ' warn' : '');
+  clearHistoryPanel();
   setTimeout(() => phoneEl.focus(), 40);
 }
 
@@ -99,9 +101,39 @@ function hideGate(mask) {
   gate.hidden = true;
   whoMask.textContent = mask || localStorage.getItem(K_MASK) || '';
   who.hidden = false;
+  loadHistory();
+  maybeAskConsent();
 }
 
+/* ============================================================
+   敏感个人信息单独同意
+   健康信息（症状/过敏/生理期等）属敏感个人信息，需单独授权。
+   未选择过 → 弹窗；同意 → 存 '1'；拒绝 → 存 '0'（降级为通用回答）。
+   拒绝不等于不能登录，产品仍可用，只是不提取个人健康特征。
+   ============================================================ */
+const consentOverlay = document.getElementById('consent');
+const consentAgree = document.getElementById('consent-agree');
+const consentDeny = document.getElementById('consent-deny');
+
+function maybeAskConsent() {
+  if (!consentOverlay) return;
+  if (localStorage.getItem(K_CONSENT) === null) {
+    consentOverlay.hidden = false;
+  }
+}
+
+function setConsent(v) {
+  localStorage.setItem(K_CONSENT, v ? '1' : '0');
+  if (consentOverlay) consentOverlay.hidden = true;
+  input.focus();
+}
+
+if (consentAgree) consentAgree.addEventListener('click', () => setConsent(true));
+if (consentDeny) consentDeny.addEventListener('click', () => setConsent(false));
+
 async function bootstrap() {
+  // 每次打开首页都是新会话。上次的编号只在点进某条历史时才恢复。
+  localStorage.removeItem(K_SID);
   if (!tokens.access) return showGate('');
   try {
     const r = await api('/auth/principal');
@@ -749,8 +781,8 @@ function renderGraphBlock(g) {
   const actions = el('div', 'graph-actions');
   const btn = el('button', 'ghost-btn', '在图谱探索中打开');
   btn.addEventListener('click', () => {
-    const anchors = (g.nodes || []).filter((x) => x.anchor);
-    openDrawer(anchors[0] ? anchors[0].name : '', anchors[1] ? anchors[1].name : '');
+    const anchors = (g.nodes || []).filter((x) => x.anchor).map((x) => x.name);
+    openDrawer(anchors.length ? anchors : undefined);
   });
   actions.appendChild(btn);
   d.appendChild(actions);
@@ -859,30 +891,46 @@ function renderError(status, detail) {
 }
 
 /* ============================================================
-   图谱探索抽屉：输入两个食材，看它们在图里是什么关系
+   图谱探索抽屉：加多个食材（2~4 个），看它们之间的两两关系
    ============================================================ */
 const drawer = document.getElementById('drawer');
-const gA = document.getElementById('g-a');
-const gB = document.getElementById('g-b');
 const gGo = document.getElementById('g-go');
-const gExpand = document.getElementById('g-expand');
 const gMsg = document.getElementById('g-msg');
 const gGraph = document.getElementById('g-graph');
 const gFacts = document.getElementById('g-facts');
+const gTagHint = document.getElementById('g-tag-hint');
 
-const KIND_TEXT = {
-  direct: '两个食材在图上直接相连：',
-  path: '两个食材没有直接关系，但在 {hops} 跳内连通（例如经由同一种营养素/人群）：',
-  none: '这两个食材在现有图谱里暂时连不上 —— 没有已知的搭配、相克或共同的营养素节点。',
-};
+// 固定的 4 个输入框
+const gInputs = [0, 1, 2, 3].map((i) => document.getElementById(`g-f${i}`));
 
-async function loadGraph(a, b) {
-  a = (a ?? gA.value).trim();
-  b = (b ?? gB.value).trim();
-  if (!a) {
+const MAX_FOODS = 4;
+const MIN_FOODS = 2;
+
+// 收集所有非空输入框里的食材（去重、保序）
+function collectFoods() {
+  const out = [];
+  gInputs.forEach((inp) => {
+    const term = (inp.value || '').trim();
+    if (term && !out.includes(term)) out.push(term);
+  });
+  return out;
+}
+
+function updateTagHint() {
+  const n = collectFoods().length;
+  gTagHint.textContent = n === 0
+    ? `填入 2~4 个食材，看它们之间的两两关系`
+    : n < MIN_FOODS
+      ? `已填 ${n} 个，至少再填 ${MIN_FOODS - n} 个`
+      : `已填 ${n} 个，可再加 ${MAX_FOODS - n} 个`;
+  gTagHint.className = 'tag-hint' + (n < MIN_FOODS ? ' warn' : '');
+}
+
+async function loadGraph(foods) {
+  const list = (foods || collectFoods()).filter(Boolean);
+  if (list.length < MIN_FOODS) {
     gMsg.className = 'gate-msg warn';
-    gMsg.textContent = '至少填一个食材名';
-    gA.focus();
+    gMsg.textContent = `至少填 ${MIN_FOODS} 个食材（当前 ${list.length} 个）`;
     return;
   }
   gGo.disabled = true;
@@ -891,13 +939,12 @@ async function loadGraph(a, b) {
   gGraph.innerHTML = '';
   gFacts.innerHTML = '';
 
-  const expand = gExpand.checked ? 'true' : 'false';
-  const url = b
-    ? `/kg/relation?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&expand=${expand}`
-    : `/kg/subgraph?food=${encodeURIComponent(a)}&depth=${gExpand.checked ? 2 : 1}`;
-
   try {
-    const r = await api(url);
+    const r = await api('/kg/compare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ foods: list }),
+    });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) {
       const d = body.detail || {};
@@ -905,32 +952,37 @@ async function loadGraph(a, b) {
       gMsg.textContent = d.message || `查询失败（${r.status}）`;
       return;
     }
+
     const g = body.subgraph || { nodes: [], edges: [] };
-    const kind = (g.meta || {}).kind;
-    let head = '';
-    if (b) {
-      const tpl = KIND_TEXT[kind] || '';
-      head = tpl.replace('{hops}', (g.meta || {}).hops || 3);
-      if (kind && kind !== 'none') {
-        const na = (body.a || {}).name || a;
-        const nb = (body.b || {}).name || b;
-        head = `「${na}」与「${nb}」：` + head.replace(/^两个食材/, '');
-      }
+    const resolved = body.resolved || [];
+    const missing = body.missing || [];
+
+    // 未收录的食材一次性汇总提示，不逐条反馈
+    if (missing.length) {
+      const missTerms = missing.map((m) => `「${m.term}」`).join('、');
+      gMsg.className = 'gate-msg warn';
+      gMsg.textContent = `${missTerms} 未收录，已反馈给管理员。`;
+      gMsg.setAttribute('title', missing.map((m) => m.term).join('、'));
+    } else if (!(g.nodes || []).length) {
       gMsg.className = 'gate-msg';
+      gMsg.textContent = '这些食材在现有图谱里暂时连不上关系。';
     } else {
-      head = `「${(body.resolved || {}).name || a}」的邻域`;
+      const names = resolved.map((r) => `「${r.name}」`).join('、');
+      const truncated = (g.meta || {}).truncated ? '　（节点较多，已按规模截断）' : '';
       gMsg.className = 'gate-msg';
+      gMsg.textContent = `${names} 的两两关系` + truncated;
     }
-    gMsg.textContent = head + ((g.meta || {}).truncated ? '　（节点较多，已按规模截断）' : '');
 
     renderGraph(gGraph, g, {
       height: (g.nodes || []).length > 10 ? 380 : 300,
       onNodeClick: (n) => {
-        // 点食材节点继续往下钻；其他类型点了没意义
+        // 点食材节点：填进第一个空输入框，继续对照
         if (n.label === 'Ingredient') {
-          gA.value = n.name;
-          gB.value = '';
-          loadGraph(n.name, '');
+          const empty = gInputs.find((inp) => !inp.value.trim());
+          if (empty) {
+            empty.value = n.name;
+            updateTagHint();
+          }
         }
       },
     });
@@ -949,32 +1001,190 @@ async function loadGraph(a, b) {
   }
 }
 
-function openDrawer(a, b) {
+function openDrawer(foods) {
   if (!drawer) return;
   drawer.hidden = false;
-  if (a !== undefined) gA.value = a || '';
-  if (b !== undefined) gB.value = b || '';
-  if (a) loadGraph(gA.value.trim(), (gB.value || '').trim());
+  // 清空所有输入框
+  gInputs.forEach((inp) => { inp.value = ''; });
+  // 有预设食材（快捷按钮）就填进去
+  if (foods && foods.length) {
+    foods.forEach((f, i) => {
+      if (gInputs[i]) gInputs[i].value = f;
+    });
+  }
+  updateTagHint();
+  gMsg.className = 'gate-msg';
+  gMsg.textContent = '';
 }
 
 if (drawer) {
   document.getElementById('drawer-close').addEventListener('click', () => {
     drawer.hidden = true;
   });
-  document.getElementById('open-graph').addEventListener('click', () => openDrawer('', ''));
+  document.getElementById('open-graph').addEventListener('click', () => openDrawer());
   gGo.addEventListener('click', () => loadGraph());
-  [gA, gB].forEach((i) => i.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.isComposing) loadGraph();
-  }));
-  gExpand.addEventListener('change', () => {
-    if (gA.value.trim()) loadGraph();
+  gInputs.forEach((inp) => {
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
+        loadGraph();
+      }
+    });
+    inp.addEventListener('input', updateTagHint);
   });
   document.querySelectorAll('.mini-sample').forEach((btn) =>
-    btn.addEventListener('click', () => openDrawer(btn.dataset.a || '', btn.dataset.b || '')));
+    btn.addEventListener('click', () => {
+      const foods = (btn.dataset.foods || '').split(',').map((s) => s.trim()).filter(Boolean);
+      openDrawer(foods);
+    }));
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !drawer.hidden) drawer.hidden = true;
   });
+
+  // 左侧拖拽拉伸抽屉宽度（right 固定，改 width 即往左延伸）
+  const resizer = document.getElementById('drawer-resizer');
+  const MIN_W = 360;
+  const MAX_W = 900;
+  if (resizer) {
+    resizer.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = drawer.getBoundingClientRect().width;
+      resizer.classList.add('dragging');
+      document.body.classList.add('drawer-resizing');
+
+      const onMove = (ev) => {
+        // right:0，所以往左拖（clientX 变小）宽度变大
+        const w = startW + (startX - ev.clientX);
+        drawer.style.width = `${Math.min(MAX_W, Math.max(MIN_W, w))}px`;
+      };
+      const onUp = () => {
+        resizer.classList.remove('dragging');
+        document.body.classList.remove('drawer-resizing');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
 }
+
+/* ============================================================
+   历史会话
+   登录成功和刷新后已有令牌，都从 hideGate 进来，所以两条路拉同一次。
+   ============================================================ */
+const historyEl = document.getElementById('history');
+const sessionListEl = document.getElementById('session-list');
+const recentListEl = document.getElementById('recent-list');
+
+function clearHistoryPanel() {
+  if (sessionListEl) sessionListEl.replaceChildren();
+  if (recentListEl) recentListEl.replaceChildren();
+  if (historyEl) historyEl.classList.remove('open');
+}
+
+function formatWhen(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
+}
+
+function showEmptyThread() {
+  thread.replaceChildren();
+  if (empty) thread.appendChild(empty);
+}
+
+function addHistoryAnswer(message) {
+  hideEmpty();
+  thread.appendChild(renderAnswer({ ...message, answer: message.content || '' }));
+}
+
+async function loadHistory() {
+  if (!tokens.access || !sessionListEl) return;
+  try {
+    const [rs, rq] = await Promise.all([
+      api('/sessions'),
+      api('/recent-questions'),
+    ]);
+    if (rs.ok) renderSessions((await rs.json()).sessions || []);
+    if (rq.ok) renderRecent((await rq.json()).questions || []);
+  } catch {
+    /* 侧栏失败不挡提问 */
+  }
+}
+
+function renderSessions(rows) {
+  sessionListEl.replaceChildren();
+  if (!rows.length) {
+    sessionListEl.appendChild(el('p', 'history-empty', '还没有对话'));
+    return;
+  }
+  const current = localStorage.getItem(K_SID) || '';
+  rows.forEach((row) => {
+    const btn = el('button', 'history-item' + (row.id === current ? ' active' : ''));
+    btn.type = 'button';
+    btn.appendChild(el('span', 'history-title', row.title || '未命名对话'));
+    btn.appendChild(el('span', 'history-meta', formatWhen(row.last_at)));
+    btn.addEventListener('click', () => openSession(row.id));
+    sessionListEl.appendChild(btn);
+  });
+}
+
+function renderRecent(rows) {
+  recentListEl.replaceChildren();
+  if (!rows.length) {
+    recentListEl.appendChild(el('p', 'history-empty', '还没有提问'));
+    return;
+  }
+  rows.forEach((row) => {
+    const btn = el('button', 'recent-item', row.question);
+    btn.type = 'button';
+    btn.title = row.question;
+    btn.addEventListener('click', () => {
+      if (historyEl) historyEl.classList.remove('open');
+      ask(row.question);
+    });
+    recentListEl.appendChild(btn);
+  });
+}
+
+async function openSession(id) {
+  const r = await api('/sessions/' + encodeURIComponent(id) + '/messages');
+  if (!r.ok) {
+    localStorage.removeItem(K_SID);
+    showEmptyThread();
+    loadHistory();
+    return;
+  }
+  const body = await r.json();
+  localStorage.setItem(K_SID, id);
+  thread.replaceChildren();
+  (body.messages || []).forEach((m) => {
+    if (m.role === 'user') addQuestion(m.content);
+    else addHistoryAnswer(m);
+  });
+  if (!(body.messages || []).length) showEmptyThread();
+  if (historyEl) historyEl.classList.remove('open');
+  loadHistory();
+  scrollDown();
+}
+
+function startNewChat() {
+  localStorage.removeItem(K_SID);
+  showEmptyThread();
+  if (historyEl) historyEl.classList.remove('open');
+  loadHistory();
+  if (gate.hidden) input.focus();
+}
+
+document.getElementById('new-chat').addEventListener('click', startNewChat);
+document.getElementById('history-toggle').addEventListener('click', () => {
+  historyEl.classList.toggle('open');
+});
 
 /* ============================================================
    提问
@@ -985,6 +1195,8 @@ async function ask(question) {
   const q = (question ?? input.value).trim();
   if (!q || busy) return;
   if (gate.hidden === false) { phoneEl.focus(); return; }
+  // 敏感信息同意未处理时，先把弹窗拿出来，别让提问绕过授权
+  if (consentOverlay && !consentOverlay.hidden) { input.focus(); return; }
 
   busy = true;
   send.disabled = true;
@@ -998,6 +1210,9 @@ async function ask(question) {
     const payload = { question: q };
     const sid = localStorage.getItem(K_SID);
     if (sid) payload.session_id = sid;
+    // 健康信息是否允许收集：同意才允许后端提取个人健康特征
+    const consent = localStorage.getItem(K_CONSENT);
+    if (consent !== null) payload.consent = consent === '1';
     const r = await api('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1010,6 +1225,11 @@ async function ask(question) {
     if (r.ok && body) {
       if (body.session_id) localStorage.setItem(K_SID, body.session_id);
       thread.appendChild(renderAnswer(body));
+      loadHistory();
+    } else if (r.status === 404) {
+      localStorage.removeItem(K_SID);
+      thread.appendChild(renderError(r.status, '这条对话不存在，请新开一轮。'));
+      loadHistory();
     } else if (r.status === 401) {
       showGate('请先登录。');
     } else {

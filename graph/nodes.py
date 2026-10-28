@@ -156,7 +156,26 @@ def uncatalogued_node(state: dict) -> dict:
 # ============================================================
 def route_node(state: dict) -> dict:
     intents = detect_intent(state["question"])
-    return {"_intents": intents}
+    # 画像在分叉之前加载。图查询要拿它做过敏过滤，
+    # 降级和未收录路径也要在生成时用到年龄和症状。
+    # 用户拒绝收集健康信息时不读画像，回答保持通用。
+    profile = {} if state.get("consent_profile") is False else _load_profile(state)
+    return {"_intents": intents, "_user_profile": profile}
+
+
+def _load_profile(state: dict) -> dict:
+    existing = state.get("_user_profile")
+    if existing:
+        return existing
+    if not config.MEMORY_ENABLED:
+        return {}
+    try:
+        from memory.long_term import UserProfile
+
+        return UserProfile().get(state.get("user_id") or "anonymous")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("加载画像失败：%s", exc)
+        return {}
 
 
 def route_after_link(state: dict) -> str:
@@ -183,15 +202,6 @@ def graph_query_node(state: dict) -> dict:
     results = []
     evidence_counts: dict[str, int] = {}
     profile = state.get("_user_profile") or {}
-    # 未加载画像时，尝试从记忆系统加载
-    if not profile and config.MEMORY_ENABLED:
-        try:
-            from memory.long_term import UserProfile
-
-            profile = UserProfile().get(state.get("user_id", "anonymous"))
-        except Exception as e:  # noqa: BLE001
-            log.warning("加载画像失败：%s", e)
-            profile = {}
     allergens = list(profile.get("allergies", [])) + list(profile.get("avoid_list", []))
 
     plans = plan_queries(state.get("_entities") or [], state.get("_intents") or [])
@@ -483,6 +493,35 @@ def _defer_profile(user_id: str, question: str, answer: str) -> None:
 # ============================================================
 # memory_write —— 落库（短期消息 + 画像增量抽取）
 # ============================================================
+def answer_card(state: dict) -> dict:
+    """回答卡片上的结构化字段。和 /chat 用同一套翻译，历史回放才能把图画回来。"""
+    from kg.subgraph import build_facts, build_subgraph
+
+    results = state.get("_graph_results") or []
+    return {
+        "evidence_counts": state.get("_evidence_counts") or {},
+        "graph_hit": bool(state.get("_graph_hit")),
+        "facts": build_facts(results),
+        "subgraph": build_subgraph(state.get("_entities") or [], results),
+        "basis": state.get("basis") or [],
+        "food_requests": state.get("_food_requests") or [],
+        "disclaimer": config.DISCLAIMER,
+    }
+
+
+def retrieve_card(question: str, user_id: str) -> dict:
+    """只重跑检索，不调生成模型。给还没存过子图的旧回答补一张图。"""
+    state: dict = {"question": question, "user_id": user_id}
+    for step in (normalize_node, link_node, route_node):
+        state.update(step(state) or {})
+    if route_after_link(state) == "graph_query":
+        state.update(graph_query_node(state) or {})
+    else:
+        state["_graph_hit"] = False
+        state["_graph_results"] = []
+    return answer_card(state)
+
+
 def memory_write_node(state: dict) -> dict:
     if not config.MEMORY_ENABLED:
         return {}
@@ -490,18 +529,24 @@ def memory_write_node(state: dict) -> dict:
         from memory.short_term import ShortTermMemory
 
         user_id = state.get("user_id", "anonymous")
-        session_id = state.get("session_id")
-        if not session_id:
-            stm = ShortTermMemory()
-            session_id = stm.get_session(user_id)
-
         stm = ShortTermMemory()
-        stm.save_round(session_id, state["question"], state.get("answer", ""))
+        # 不带 session_id 就新开一会话。不要复用「还没写 ended_at」的旧会话。
+        session_id = state.get("session_id") or stm.create_session(user_id)
+        try:
+            card = answer_card(state)
+        except Exception as exc:  # noqa: BLE001 —— 卡片翻译失败仍要留下文字
+            log.warning("回答卡片翻译失败：%s", exc)
+            card = {}
+        stm.save_round(session_id, state["question"], state.get("answer", ""), card)
 
         # 画像要再打一次模型，而且不进当前这轮回答。放在请求里等，
         # 有图事实时用户会把这次耗时和生成叠在一起。没提到约束就直接跳过。
         question = state.get("question") or ""
-        if config.DASHSCOPE_API_KEY and mentions_health_constraint(question):
+        if (
+            state.get("consent_profile", True)
+            and config.DASHSCOPE_API_KEY
+            and mentions_health_constraint(question)
+        ):
             _defer_profile(user_id, question, state.get("answer", ""))
         return {"session_id": session_id}
     except Exception as e:  # noqa: BLE001 —— 记忆失败不阻断主流程

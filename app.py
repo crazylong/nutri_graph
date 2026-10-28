@@ -7,6 +7,7 @@ nutri_graph —— FastAPI 入口（只做装配，不放业务逻辑）
     api/auth.py     手机号验证码登录 / 令牌 / 注销
     api/admin.py    管理员（概览、候选审核），整个 router 挂 require_admin
     api/chat.py     主问答
+    api/history.py  历史会话与最近问法
     api/health.py   存储探活
     api/system.py   运行时状态（模型池）
 """
@@ -22,14 +23,14 @@ from api.admin import router as admin_router
 from api.auth import router as auth_router
 from api.chat import router as chat_router
 from api.health import router as health_router
+from api.history import router as history_router
 from api.kg import router as kg_router
 from api.system import router as system_router
 from security.sms import describe_config
+from utils.logging_config import configure_logging
 
-logging.basicConfig(
-    level=logging.DEBUG if config.DEBUG else logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+# configure_logging 会清掉根 logger 上的旧 handler，不要再留 basicConfig。
+configure_logging()
 log = logging.getLogger("nutri_graph")
 
 
@@ -81,7 +82,10 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title=config.APP_NAME, lifespan=lifespan)
 
-for _router in (auth_router, admin_router, chat_router, kg_router, health_router, system_router):
+for _router in (
+    auth_router, admin_router, chat_router, history_router,
+    kg_router, health_router, system_router,
+):
     app.include_router(_router)
 
 

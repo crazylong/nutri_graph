@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>食疗问答 · nutri_graph</title>
-<link rel="stylesheet" href="/assets/styles.css?v=20261028d">
+<link rel="stylesheet" href="/assets/styles.css?v=20261028j">
 </head>
 <body>
 
@@ -67,6 +67,7 @@
     <a href="/docs" target="_blank" rel="noopener">接口文档</a>
     <a href="/health" target="_blank" rel="noopener">健康状态</a>
     <button class="link-btn" id="open-graph">图谱探索</button>
+    <button class="link-btn history-toggle" id="history-toggle" type="button">历史</button>
     <span class="who" id="who" hidden>
       <span id="who-mask"></span>
       <button class="link-btn" id="logout">退出</button>
@@ -74,6 +75,19 @@
   </nav>
 </header>
 
+<div class="workspace">
+<aside class="history" id="history" aria-label="历史对话">
+  <div class="history-head">
+    <button type="button" class="primary-btn sm" id="new-chat">新对话</button>
+  </div>
+  <div class="history-scroll">
+    <p class="history-label">历史会话</p>
+    <div id="session-list"></div>
+    <p class="history-label">最近问过</p>
+    <div id="recent-list"></div>
+  </div>
+</aside>
+<div class="stage">
 <main id="thread" class="thread" aria-live="polite">
   <section class="empty" id="empty">
     <h2>问点具体的，我按图谱里的证据回答</h2>
@@ -94,11 +108,31 @@
     <textarea id="input" rows="1" placeholder="例如：痛风能吃海鲜吗？" autocomplete="off"></textarea>
     <button id="send" class="send" aria-label="发送">发送</button>
   </div>
-  <p class="hint">Enter 发送 · Shift + Enter 换行 · 回答仅供健康科普参考，不能替代医生诊断</p>
+  <p class="hint">Enter 发送 · Shift + Enter 换行 · 本产品提供健康科普信息，不构成医疗诊断或治疗建议；如有疾病症状请及时就医并遵医嘱</p>
 </footer>
+</div>
+</div>
+
+<!-- 敏感个人信息单独同意：健康信息（症状/过敏/生理期等）属敏感个人信息，需单独授权 -->
+<div class="consent-overlay" id="consent" hidden>
+  <div class="consent-card" role="dialog" aria-modal="true" aria-labelledby="consent-title">
+    <h2 id="consent-title">健康信息收集授权</h2>
+    <p>
+      为提供更贴合您情况的饮食建议，「养生了么」需要收集并存储您的健康相关信息
+      （如症状、过敏史、生理期等）。这些信息属于<strong>敏感个人信息</strong>，
+      仅在您明确同意后收集，且仅用于为您提供个性化服务。
+    </p>
+    <p class="consent-sub">拒绝后产品仍可使用，将仅提供通用回答、不提取个人健康特征。</p>
+    <div class="consent-actions">
+      <button type="button" class="ghost-btn" id="consent-deny">拒绝，仅提供通用回答</button>
+      <button type="button" class="primary-btn" id="consent-agree">同意收集</button>
+    </div>
+  </div>
+</div>
 
 <!-- 图谱探索：输入一或两个食材，把它们在知识图谱里的关系画出来 -->
 <aside class="drawer" id="drawer" hidden aria-label="图谱探索">
+  <div class="drawer-resizer" id="drawer-resizer" aria-hidden="true"></div>
   <div class="drawer-head">
     <div>
       <h2>图谱探索</h2>
@@ -108,14 +142,16 @@
   </div>
 
   <div class="drawer-form">
-    <input id="g-a" placeholder="食材 A，如：黑豆" autocomplete="off">
-    <input id="g-b" placeholder="食材 B（可选），如：菠菜" autocomplete="off">
+    <input id="g-f0" placeholder="食材 1，如：黑豆" autocomplete="off">
+    <input id="g-f1" placeholder="食材 2，如：菠菜" autocomplete="off">
+    <input id="g-f2" placeholder="食材 3（可选）" autocomplete="off">
+    <input id="g-f3" placeholder="食材 4（可选）" autocomplete="off">
     <button class="primary-btn sm" id="g-go">查看关系</button>
-    <label class="check"><input type="checkbox" id="g-expand"> 展开两侧邻域（两跳）</label>
+    <p class="tag-hint" id="g-tag-hint">填入 2~4 个食材，看它们之间的两两关系</p>
     <div class="mini-samples">
-      <button class="mini-sample" data-a="西红柿" data-b="牛肉">西红柿 · 牛肉</button>
-      <button class="mini-sample" data-a="菠菜" data-b="豆腐">菠菜 · 豆腐</button>
-      <button class="mini-sample" data-a="黑豆" data-b="">黑豆（单食材）</button>
+      <button class="mini-sample" data-foods="西红柿,牛肉">西红柿 · 牛肉</button>
+      <button class="mini-sample" data-foods="菠菜,豆腐">菠菜 · 豆腐</button>
+      <button class="mini-sample" data-foods="黑豆,菠菜,豆腐,牛肉">黑豆 · 菠菜 · 豆腐 · 牛肉</button>
     </div>
   </div>
 
@@ -125,6 +161,6 @@
   <p class="disclaimer">点食材节点可继续下钻；拖动节点可以拉开被压住的边。</p>
 </aside>
 
-<script src="/assets/app.js?v=20261028d"></script>
+<script src="/assets/app.js?v=20261028j"></script>
 </body>
 </html>

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+import kg.subgraph as sg
 from kg.subgraph import build_facts, build_subgraph, parse_amount
 
 pytestmark = pytest.mark.no_db
@@ -119,3 +120,53 @@ def test_symptom_remedy_draws_population_and_symptom():
     assert labels == ["Ingredient", "Population", "Symptom"]
     rels = {e["rel"] for e in g["edges"]}
     assert rels == {"CONTRA_POPULATION", "HAS_SYMPTOM"}
+
+
+def test_compare_many_merges_and_dedupes(monkeypatch):
+    """多食材对照：三对关系合并进一张图，共同营养素节点只留一个。"""
+    def fake_fetch(cid):
+        return {"label": "Ingredient", "cid": cid, "name": {"A": "黑豆", "B": "菠菜", "C": "豆腐"}[cid]}
+
+    def fake_relation(a, b, **kw):
+        # A、B 都含 N（共同营养素），C 与 A 直接搭配
+        if a == "A" and b == "B":
+            return {
+                "nodes": [
+                    {"id": "A", "label": "Ingredient", "name": "黑豆", "anchor": True, "hop": 0, "props": {}},
+                    {"id": "B", "label": "Ingredient", "name": "菠菜", "anchor": True, "hop": 0, "props": {}},
+                    {"id": "N", "label": "Nutrient", "name": "铁", "anchor": False, "hop": 1, "props": {}},
+                ],
+                "edges": [
+                    {"source": "A", "target": "N", "rel": "CONTAINS_NUTRIENT", "rel_label": "含有", "hop": 1},
+                    {"source": "B", "target": "N", "rel": "CONTAINS_NUTRIENT", "rel_label": "含有", "hop": 1},
+                ],
+                "meta": {},
+            }
+        if a == "A" and b == "C":
+            return {
+                "nodes": [
+                    {"id": "A", "label": "Ingredient", "name": "黑豆", "anchor": True, "hop": 0, "props": {}},
+                    {"id": "C", "label": "Ingredient", "name": "豆腐", "anchor": True, "hop": 0, "props": {}},
+                ],
+                "edges": [
+                    {"source": "A", "target": "C", "rel": "RECOMMEND_PAIR", "rel_label": "推荐搭配", "hop": 1},
+                ],
+                "meta": {},
+            }
+        return {"nodes": [], "edges": [], "meta": {}}
+
+    monkeypatch.setattr(sg, "fetch_node", fake_fetch)
+    monkeypatch.setattr(sg, "relation_between", fake_relation)
+
+    g = sg.compare_many(["A", "B", "C"])
+
+    ids = {n["id"] for n in g["nodes"]}
+    assert ids == {"A", "B", "C", "N"}  # N 只出现一次，被去重合并
+
+    anchors = [n["id"] for n in g["nodes"] if n["anchor"]]
+    assert set(anchors) == {"A", "B", "C"}
+
+    pairs = {(e["source"], e["target"]) for e in g["edges"]}
+    assert ("A", "N") in pairs and ("B", "N") in pairs and ("A", "C") in pairs
+    assert g["meta"]["kind"] == "compare"
+    assert g["meta"]["pair_count"] == 3

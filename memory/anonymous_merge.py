@@ -72,9 +72,12 @@ def merge_anon_into_user(anon_id: str, user_id: str) -> dict[str, Any]:
                 cur = conn.cursor()
                 cur.execute(
                     """
-                    INSERT INTO user_profile
-                        (user_id, allergies, conditions, diet_style, avoid_list, updated_at)
-                    SELECT %s, allergies, conditions, diet_style, avoid_list, now()
+                    INSERT INTO user_profile (
+                        user_id, allergies, conditions, diet_style, avoid_list,
+                        age, gender, height_cm, weight_kg, hobbies, symptoms, updated_at
+                    )
+                    SELECT %s, allergies, conditions, diet_style, avoid_list,
+                           age, gender, height_cm, weight_kg, hobbies, symptoms, now()
                     FROM user_profile WHERE user_id = %s
                     ON CONFLICT (user_id) DO UPDATE SET
                         allergies = ARRAY(
@@ -89,8 +92,21 @@ def merge_anon_into_user(anon_id: str, user_id: str) -> dict[str, Any]:
                             SELECT DISTINCT unnest(
                                 COALESCE(user_profile.avoid_list, '{}')
                                 || COALESCE(EXCLUDED.avoid_list, '{}'))),
+                        hobbies = ARRAY(
+                            SELECT DISTINCT unnest(
+                                COALESCE(user_profile.hobbies, '{}')
+                                || COALESCE(EXCLUDED.hobbies, '{}'))),
+                        symptoms = ARRAY(
+                            SELECT DISTINCT unnest(
+                                COALESCE(user_profile.symptoms, '{}')
+                                || COALESCE(EXCLUDED.symptoms, '{}'))),
                         diet_style = COALESCE(
                             NULLIF(user_profile.diet_style, ''), EXCLUDED.diet_style),
+                        gender = COALESCE(
+                            NULLIF(user_profile.gender, ''), EXCLUDED.gender),
+                        age = COALESCE(user_profile.age, EXCLUDED.age),
+                        height_cm = COALESCE(user_profile.height_cm, EXCLUDED.height_cm),
+                        weight_kg = COALESCE(user_profile.weight_kg, EXCLUDED.weight_kg),
                         updated_at = now()
                     """,
                     (user_id, anon_id),

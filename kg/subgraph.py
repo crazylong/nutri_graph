@@ -484,6 +484,45 @@ def relation_between(
     return _trim(out, config.SUBGRAPH_MAX_NODES)
 
 
+def compare_many(
+    cids: list[str],
+    rels: list[str] | None = None,
+    include_provisional: bool | None = None,
+) -> dict[str, Any]:
+    """多个食材的两两关系合并成一张子图。
+
+    对每一对 (cids[i], cids[j]) 跑 relation_between，把结果逐对 _merge 进来。
+    节点天然去重（_merge 里按 id 判重），所以 4 个食材共同串到一个营养素节点时，
+    图上只会出现一个营养素节点，而不是每对各自画一个 —— 这正是「对照」想要的效果。
+
+    性能：4 个食材最多 C(4,2)=6 对点对点小查询，远轻于两跳邻域，可控。
+    """
+    rels = rels or DEFAULT_RELS
+    if include_provisional is None:
+        include_provisional = config.INCLUDE_PROVISIONAL
+
+    out: dict[str, Any] = {"nodes": [], "edges": [], "meta": {"kind": "compare"}}
+    anchors: list[str] = []
+    for cid in cids:
+        n = fetch_node(cid)
+        if not n:
+            continue
+        if not any(x["id"] == cid for x in out["nodes"]):
+            out["nodes"].append(_mk_node(cid, n["label"], n["name"], anchor=True))
+        if cid not in anchors:
+            anchors.append(cid)
+
+    for i in range(len(cids)):
+        for j in range(i + 1, len(cids)):
+            a, b = cids[i], cids[j]
+            pair = relation_between(a, b, rels=rels, include_provisional=include_provisional)
+            _merge(out, pair, hop=1)
+
+    out["meta"]["anchors"] = anchors
+    out["meta"]["pair_count"] = len(cids) * (len(cids) - 1) // 2
+    return _trim(out, config.SUBGRAPH_MAX_NODES)
+
+
 def _touch_node(out: dict[str, Any], cid: str) -> None:
     if any(n["id"] == cid for n in out["nodes"]):
         return
