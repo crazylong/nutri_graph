@@ -37,7 +37,9 @@ def load() -> None:
     specs = [
         # (文件, entity_type, canonical_id 列, 别名列)
         ("ingredient_canonical.csv", "Ingredient", "canonical_id", "aliases"),
-        ("nutrient_map.csv", "Nutrient", "canonical_id", ""),
+        # nutrient_map.csv 从第二批营养素起带 aliases 列（硫胺素/核黄素/尼克酸…），
+        # 用户用成分表里的学名提问也要能链到同一个节点
+        ("nutrient_map.csv", "Nutrient", "canonical_id", "aliases"),
         ("population.csv", "Population", "canonical_id", ""),
         ("symptom.csv", "Symptom", "canonical_id", "aliases"),
         ("taboo.csv", "Taboo", "canonical_id", ""),

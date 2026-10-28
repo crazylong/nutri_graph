@@ -252,6 +252,20 @@ FOOD_REQUEST_GLOBAL_DAILY_LIMIT = int(os.getenv("FOOD_REQUEST_GLOBAL_DAILY_LIMIT
 # （pg_trgm 对中文实测全是 0.000，这条走 kg/textsim 的字级相似度）
 FOOD_NEAR_MISS_MIN_SIM = float(os.getenv("FOOD_NEAR_MISS_MIN_SIM", "0.62"))
 
+# ============================================================
+# 公开演示：Excel 导入食物（/kg/import）
+# ============================================================
+# 这个入口**不鉴权**（演示要开放给所有人），所以限制只能在服务端做。
+# 三道闸：单文件大小 / 单文件行数（在 kg/importer.py 里，属解析契约）、
+# 以及下面这个「每 IP 每天几次」。没有它，一个脚本就能把库刷到几十万行。
+FOOD_IMPORT_ENABLED = os.getenv("FOOD_IMPORT_ENABLED", "true").lower() == "true"
+FOOD_IMPORT_DAILY_LIMIT_PER_IP = int(os.getenv("FOOD_IMPORT_DAILY_LIMIT_PER_IP", "20"))
+# 手工录入单条记录：一次提交只有一条，不该和「上传一个 500 行文件」共用次数，
+# 但它同样是公开入口，仍然要限。40 ≈ 一个人认真填一天的量。
+FOOD_MANUAL_DAILY_LIMIT_PER_IP = int(os.getenv("FOOD_MANUAL_DAILY_LIMIT_PER_IP", "40"))
+# 预览结果保留多久。超时的批次不能再 commit，避免「半小时前看的预览」被误提交。
+FOOD_IMPORT_PREVIEW_TTL_MIN = int(os.getenv("FOOD_IMPORT_PREVIEW_TTL_MIN", "60"))
+
 # ---- 抓取与校验（Phase 9.2）----
 # 检索画像怎么来：auto = 内置优先，没有再调模型（演示/离线最稳）；llm = 只用模型；static = 只用内置
 FOOD_DRAFT_MODE = os.getenv("FOOD_DRAFT_MODE", "auto").lower()

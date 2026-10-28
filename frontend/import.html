@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>食物导入 · 食疗问答</title>
+<link rel="stylesheet" href="/assets/styles.css?v=20261028k">
+<link rel="stylesheet" href="/assets/import.css?v=20261028g">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot ok" title="演示环境"></span>
+    <div>
+      <h1>食物导入</h1>
+      <p>上传一张表格，审核通过后就能被问答检索</p>
+    </div>
+  </div>
+  <nav class="topnav">
+    <a href="/">返回问答</a>
+    <a href="/docs" target="_blank" rel="noopener">接口文档</a>
+    <a href="/health" target="_blank" rel="noopener">健康状态</a>
+  </nav>
+</header>
+
+<main class="wrap">
+
+  <!-- ============ 说明 ============ -->
+  <section class="hero">
+    <span class="eyebrow"><i></i>演示功能 · 无需登录</span>
+    <h1>一份 Excel，四步变成可查的食物库</h1>
+    <p class="lead">
+      上传 → 校验 → 预览 → 提交审核。<b>校验在服务端做</b>：单位写错、数值越界、分类不在枚举里，
+      都会在预览阶段逐行标出来，而不是悄悄存进去。<br>
+      提交后进入<b>和抓取数据同一条审核队列</b>，通过后进图谱 —— 问答、图谱探索、食材对比都能查到。
+    </p>
+
+    <div class="hero-actions">
+      <a class="primary-btn btn" id="tpl-xlsx" href="/template/food_import_v1.xlsx" download>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+        下载 Excel 模板
+      </a>
+      <a class="btn ghost" id="tpl-csv" href="/template/food_import_v1.csv" download>CSV 模板</a>
+      <a class="btn ghost" href="#field-spec">字段说明</a>
+    </div>
+
+    <p class="meta-line" id="meta-line">
+      模板含 <code>23</code> 列 · 单次最多 <code>500</code> 行 · 文件 <code>1MB</code> 以内
+    </p>
+  </section>
+
+  <!-- ============ 步骤 ============ -->
+  <ol class="steps" id="steps">
+    <li class="on" data-step="1"><b>1</b>上传表格 / 录一条</li>
+    <li class="bar" aria-hidden="true"></li>
+    <li data-step="2"><b>2</b>逐行校验</li>
+    <li class="bar" aria-hidden="true"></li>
+    <li data-step="3"><b>3</b>提交审核</li>
+    <li class="bar" aria-hidden="true"></li>
+    <li data-step="4"><b>4</b>等审核进图谱</li>
+  </ol>
+
+  <!-- ============ 1. 上传 ============ -->
+  <section class="card" id="box-upload">
+    <div class="card-head">
+      <h2>选择文件</h2>
+      <p>支持 .xlsx / .csv</p>
+    </div>
+
+    <label class="drop" id="drop" for="file">
+      <span class="ico">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
+      </span>
+      <span class="t1">把表格拖到这里，或 <u>点击选择文件</u></span>
+      <span class="t2">第一行是列名。列名写成「能量(kcal)」或「能量」都能认出来</span>
+    </label>
+    <input type="file" id="file" accept=".xlsx,.xlsm,.csv" hidden>
+
+    <p class="msg" id="upload-msg" role="status"></p>
+  </section>
+
+  <!-- ============ 1b. 手工录入（一条） ============ -->
+  <section class="card" id="box-manual">
+    <div class="card-head">
+      <h2>或者，直接填一条</h2>
+      <p>只有一条数据时，不值得为它做一个表格</p>
+    </div>
+
+    <form id="manual-form" novalidate>
+      <div class="mgrid">
+        <div class="mfield">
+          <label for="m-name">名称 <i>*</i></label>
+          <input id="m-name" name="name" type="text" maxlength="40" placeholder="如：藜麦" autocomplete="off">
+        </div>
+        <div class="mfield">
+          <label for="m-category">分类 <i>*</i></label>
+          <select id="m-category" name="category"></select>
+        </div>
+        <div class="mfield">
+          <label for="m-nature">性味</label>
+          <select id="m-nature" name="nature"></select>
+        </div>
+        <div class="mfield">
+          <label for="m-aliases">别名</label>
+          <input id="m-aliases" name="aliases" type="text" maxlength="200" placeholder="多个用分号 ; 分隔" autocomplete="off">
+        </div>
+        <div class="mfield">
+          <label for="m-english">英文名</label>
+          <input id="m-english" name="english_name" type="text" maxlength="80" autocomplete="off">
+        </div>
+        <div class="mfield">
+          <label for="m-scientific">学名</label>
+          <input id="m-scientific" name="scientific_name" type="text" maxlength="120" autocomplete="off">
+        </div>
+      </div>
+
+      <div class="msep">
+        <span>每 100 克可食部</span>
+        <em>空着 = 未测定，不会当成 0</em>
+      </div>
+      <div class="mgrid nut" id="m-nutrients"></div>
+
+      <div class="mgrid">
+        <div class="mfield wide">
+          <label for="m-source">来源 <i>*</i></label>
+          <input id="m-source" name="source" type="text" maxlength="200"
+                 placeholder="书名 + 版本 + 页码，或一个 URL" autocomplete="off">
+        </div>
+        <div class="mfield wide">
+          <label for="m-note">备注</label>
+          <input id="m-note" name="note" type="text" maxlength="200"
+                 placeholder="不进图谱，只留档" autocomplete="off">
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="primary-btn btn" id="manual-submit" type="submit">提交审核</button>
+        <button class="btn ghost" id="manual-reset" type="button">清空</button>
+        <span class="spacer"></span>
+        <span class="hintline">和表格导入进的是同一个审核队列</span>
+      </div>
+      <p class="msg" id="manual-msg" role="status"></p>
+      <div id="manual-errors"></div>
+    </form>
+  </section>
+
+  <!-- ============ 2/3. 预览 ============ -->
+  <section class="card" id="box-preview" hidden>
+    <div class="card-head">
+      <h2>校验结果</h2>
+      <p id="preview-file"></p>
+    </div>
+
+    <div class="sum" id="sum"></div>
+    <div id="unknown-note"></div>
+
+    <div class="tbl-wrap">
+      <table class="pv">
+        <colgroup>
+          <col style="width:5%">
+          <col style="width:31%">
+          <col style="width:10%">
+          <col style="width:11%">
+          <col style="width:10%">
+          <col style="width:10%">
+          <col style="width:10%">
+          <col style="width:13%">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>行</th>
+            <th>名称</th>
+            <th>分类</th>
+            <th style="text-align:right">能量</th>
+            <th style="text-align:right">蛋白</th>
+            <th style="text-align:right">脂肪</th>
+            <th style="text-align:right">碳水</th>
+            <th>判定</th>
+          </tr>
+        </thead>
+        <tbody id="pv-body"></tbody>
+      </table>
+    </div>
+
+    <div class="actions">
+      <button class="primary-btn btn" id="commit" type="button">提交审核</button>
+      <button class="btn ghost" id="reset" type="button">换一个文件</button>
+      <span class="spacer"></span>
+      <span class="hintline" id="preview-hint"></span>
+    </div>
+    <p class="msg" id="commit-msg" role="status"></p>
+  </section>
+
+  <!-- ============ 4. 结果 ============ -->
+  <section class="card" id="box-result" hidden>
+    <div class="card-head"><h2>已提交审核</h2><p id="result-file"></p></div>
+    <div class="result">
+      <div class="big">
+        <div><b id="r-new">0</b><span>条新增</span></div>
+        <div><b id="r-upd" style="color:var(--ink-2)">0</b><span>条覆盖</span></div>
+      </div>
+      <span class="spacer" style="flex:1"></span>
+      <button class="primary-btn btn" id="jump" type="button">看下面的食物库 ↓</button>
+      <button class="btn ghost" id="again" type="button">再导一批</button>
+    </div>
+    <p class="review-note" id="review-note"></p>
+  </section>
+
+  <!-- ============ 食物库 ============ -->
+  <section id="library">
+    <div class="lib-head">
+      <h2>已导入的食物<em id="lib-count"></em></h2>
+      <div class="lib-tools">
+        <span class="queue-hint" id="queue-hint"></span>
+        <input id="lib-q" type="search" placeholder="搜名称或别名" autocomplete="off">
+      </div>
+    </div>
+    <div class="chips" id="lib-chips"></div>
+    <div class="grid" id="lib-grid"></div>
+    <div class="empty" id="lib-empty" hidden>
+      还没有导入任何食物。<br>
+      下载模板，填两行再上传，这里就会出现卡片。
+    </div>
+    <div class="more-wrap">
+      <button class="btn ghost" id="lib-more" type="button" hidden>加载更多</button>
+    </div>
+  </section>
+
+  <!-- ============ 字段说明 ============ -->
+  <section id="field-spec" style="margin-top:44px">
+    <div class="lib-head">
+      <h2>字段说明</h2>
+      <p class="hintline">与模板的「字段说明」页一致，改列以这里为准</p>
+    </div>
+    <div class="tbl-wrap" style="margin-top:12px">
+      <table class="pv">
+        <colgroup>
+          <col style="width:22%">
+          <col style="width:8%">
+          <col style="width:10%">
+          <col style="width:16%">
+          <col>
+        </colgroup>
+        <thead>
+          <tr><th>列名</th><th>必填</th><th>单位</th><th>图谱 id</th><th>说明</th></tr>
+        </thead>
+        <tbody id="spec-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="pagefoot">
+    本页为演示功能：导入的数据和抓取数据走同一条审核队列，审核通过后进入知识图谱，
+    问答、图谱探索、食材对比都能查到。<br>
+    请只导入你有权使用的数据。中国食物成分表版权归中国疾控中心营养与健康所所有，
+    商业使用需另行取得授权。演示场景请在「来源」列标注出处。
+  </p>
+
+</main>
+
+<script src="/assets/import.js?v=20261028g"></script>
+</body>
+</html>

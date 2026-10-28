@@ -367,7 +367,7 @@ def reject_food_request(request_id: int, req: RejectRequest):
 
 @router.post("/kg/requests")
 def create_food_request(req: ManualFoodRequest, admin: dict = Depends(require_admin)):
-    """管理员手工登记。不占个人日限额，仍受全站日上限约束。"""
+    """管理员手工登记。不占个人日限额，仍受全站日上限约束。不累加搜索次数。"""
     from kg.request import register
 
     result = register(
@@ -375,6 +375,7 @@ def create_food_request(req: ManualFoodRequest, admin: dict = Depends(require_ad
         who=admin["user_id"],
         source="admin",
         skip_user_limit=True,
+        count_hit=False,
     )
     if result.code == "global_daily_limit" or result.action == "rate_limited":
         raise HTTPException(

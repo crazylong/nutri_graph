@@ -77,6 +77,31 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "no_db: 纯逻辑用例，不连 PostgreSQL / Neo4j，也不受「非测试库」保护的影响"
     )
+    config.addinivalue_line(
+        "markers",
+        "graph: 会**写** Neo4j 的用例（审核 → 合并 → 回滚）。默认跳过，见 _graph_guard。",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _graph_guard(request):
+    """默认不跑「写图」的用例。
+
+    为什么单独一道闸：PG 可以指到 *_test 库，Neo4j 却**只有一个库**（社区版），
+    测试和生产共用同一张图。写图的用例会：
+      * 用同一个 ingredient_cid_seq 造节点 → 可能正好 MERGE 到线上已有节点上；
+      * 清理时按 batch_id 删节点 → 一旦匹配写松了就是删生产数据。
+    2026-10-28 就真删掉了线上 120 个食材节点（`provenance CONTAINS 'bundle:12'`
+    命中了 bundle:120…129、bundle:1200…1299）。
+
+    所以要跑这类用例，必须显式确认「这张图可以被清」：
+        ALLOW_GRAPH_TESTS=1 pytest -q
+    """
+    if "graph" in request.keywords and os.environ.get("ALLOW_GRAPH_TESTS") != "1":
+        pytest.skip(
+            "写图的用例默认跳过：Neo4j 社区版只有一个库，测试与生产共用同一张图。"
+            "确认这张图可以被写/被清，再设 ALLOW_GRAPH_TESTS=1。"
+        )
 
 
 @pytest.fixture(autouse=True)

@@ -6,7 +6,7 @@
     </div>
     <div class="filters">
       <el-select v-model="status" clearable placeholder="全部状态" style="width: 180px" @change="reload">
-        <el-option v-for="item in statuses" :key="item" :label="item" :value="item" />
+        <el-option v-for="item in statuses" :key="item" :label="statusText(item)" :value="item" />
       </el-select>
       <el-input v-model="keyword" placeholder="食物名或原话" style="width: 240px" @keyup.enter="reload" />
       <el-button @click="reload">查询</el-button>
@@ -15,7 +15,9 @@
       <el-table-column prop="food_key" label="归一名" />
       <el-table-column prop="raw_mention" label="原话" />
       <el-table-column prop="hit_count" label="次数" width="80" />
-      <el-table-column prop="status" label="状态" width="140" />
+      <el-table-column label="状态" width="160">
+        <template #default="{ row }">{{ statusText(row.status) }}</template>
+      </el-table-column>
       <el-table-column prop="source" label="来源" width="100" />
       <el-table-column prop="reject_reason" label="驳回理由" />
       <el-table-column prop="last_requested_at" label="最近提及" width="180" />
@@ -33,7 +35,7 @@
         <p>归一名：{{ detail.food_key }}</p>
         <p>原话：{{ detail.raw_mention }}</p>
         <p>次数：{{ detail.hit_count }}</p>
-        <p>状态：{{ detail.status }}</p>
+        <p>状态：{{ statusText(detail.status) }}</p>
         <p>来源：{{ detail.source }}</p>
         <p>提交者：{{ detail.requested_by }}</p>
         <p>驳回理由：{{ detail.reject_reason || '—' }}</p>
@@ -58,6 +60,18 @@ import { ElMessage } from 'element-plus'
 import { api, errorMessage, readJson } from '../api'
 
 const statuses = ['queued', 'fetching', 'fetched', 'pending_review', 'approved', 'rejected']
+// 与后端 kg/request.py 的 _status_cn 保持一致：未收录食物的生命周期状态
+const STATUS_CN = {
+  queued: '已登记，等待处理',
+  fetching: '正在从权威来源获取',
+  fetched: '已获取，等待校验',
+  pending_review: '等待人工审核',
+  approved: '已收录',
+  rejected: '未通过核实',
+}
+function statusText(s) {
+  return STATUS_CN[s] || s
+}
 const status = ref('')
 const keyword = ref('')
 const items = ref([])

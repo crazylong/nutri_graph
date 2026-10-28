@@ -109,12 +109,18 @@ def merge_nodes(batch_id: str | None = None) -> int:
                     for it in items
                 ]
                 # label 不能参数化，只能拼串 —— 所以上面必须用白名单卡住
+                #
+                # .consume() 不能省：s.run() 返回的是**惰性结果**，auto-commit 的
+                # 写事务要到结果被读完才提交。不消费就往下走，会话结束时驱动发的
+                # RESET 会把这笔还没提交的写**回滚掉**，而 PG 侧照样把候选标成
+                # merged —— 于是「库里 1331 个食材都是 merged，图里只有 888 个」，
+                # 479 个食材连同营养边一起消失，还查不出错（2026-10-28 修）。
                 s.run(
                     f"UNWIND $rows AS row "
                     f"MERGE (n:`{label}` {{canonical_id: row.canonical_id}}) "
                     f"SET n += row.props",
                     rows=payload,
-                )
+                ).consume()
                 merged_ids.extend(it["id"] for it in items)
     finally:
         driver.close()
@@ -133,7 +139,8 @@ def _fetch_approved(batch_id: str | None = None) -> list[dict[str, Any]]:
     """从候选表取待合并的 approved 边候选。"""
     cols = (
         "id, batch_id, src_id, rel, dst_id, claim_text, evidence_type, "
-        "evidence_level, sources, confidence, source_locator, provisional, source_count"
+        "evidence_level, sources, confidence, source_locator, provisional, source_count, "
+        "amount, unit"
     )
     with psycopg.connect(config.PG_DSN) as conn:
         cur = conn.cursor()
@@ -177,6 +184,13 @@ def merge(batch_id: str | None = None) -> int:
                     log.warning("未知关系类型，跳过：%s", rel)
                     continue
                 rk = relation_key(r["src_id"], rel, r["dst_id"])
+                # amount / unit 只有营养边才有值。为 None 时不写这两句 ——
+                # Cypher 里 SET r.x = null 等于**删掉属性**，会把别的来源
+                # 早先写好的数值抹掉（MERGE 命中已有边时尤其危险）。
+                amount = r.get("amount")
+                numeric = (
+                    f"r.amount = $amount, r.unit = $unit, " if amount is not None else ""
+                )
                 cypher = (
                     f"MATCH (a {{canonical_id: $src_id}}) "
                     f"MATCH (b {{canonical_id: $dst_id}}) "
@@ -189,6 +203,7 @@ def merge(batch_id: str | None = None) -> int:
                     f"r.source_locator = $source_locator, "
                     f"r.source_count = $source_count, "
                     f"r.provisional = $provisional, "
+                    f"{numeric}"
                     f"r.batch_id = $batch_id, "
                     f"r.review_status = 'merged'"
                 )
@@ -205,8 +220,10 @@ def merge(batch_id: str | None = None) -> int:
                     source_locator=r.get("source_locator") or "",
                     source_count=int(r.get("source_count") or 0),
                     provisional=bool(r.get("provisional")),
+                    amount=amount,
+                    unit=r.get("unit") or "",
                     batch_id=r["batch_id"],
-                )
+                ).consume()
                 merged_ids.append(r["id"])
     finally:
         driver.close()
@@ -229,6 +246,14 @@ def rollback(batch_id: str) -> int:
     为什么不能直接按候选表里的 canonical_id 删：审核时可能把新食材
     挂到了既有节点（黑豆 → 已有的黑大豆），那个节点是种子里就有的，
     删掉等于把别人的数据一起清了。
+
+    provenance 必须**精确匹配**，不能用 CONTAINS：
+    `provenance CONTAINS 'bundle:12'` 会同时命中 `bundle:120` / `bundle:1200`…
+    —— 回滚一份 bundle:12，把后面一百多份数据一起删了，而且不报错。
+    这不是理论风险：2026-10-28 线上真被删掉 120 个食材节点（测试用例里
+    rollback("bundle:12") 打到了生产图），补回来花了一轮。
+    provenance 的格式是 `bundle:<id> <source_key>:<external_id>`，所以
+    「等于」或「以 `bundle:<id> ` 开头」（带空格）才是只属于这一份。
     """
     driver = _driver()
     deleted_nodes = 0
@@ -241,9 +266,10 @@ def rollback(batch_id: str) -> int:
             n = result["n"] if result else 0
 
             result = s.run(
-                "MATCH (n) WHERE n.provenance CONTAINS $bid "
+                "MATCH (n) WHERE n.provenance = $bid "
+                "   OR n.provenance STARTS WITH $bid_prefix "
                 "DETACH DELETE n RETURN count(n) AS c",
-                bid=batch_id,
+                bid=batch_id, bid_prefix=f"{batch_id} ",
             ).single()
             deleted_nodes = result["c"] if result else 0
     finally:

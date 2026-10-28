@@ -45,6 +45,25 @@ class PromoteError(RuntimeError):
     """审核动作被拒绝（状态不对、有硬否决、缺字段等）。"""
 
 
+# 这些属性一旦节点已存在就不许被新 bundle 覆盖（旧值为空时才补）。
+# canonical_name / category 属于「身份」，别名命中时它们必须让位给既有节点，
+# 否则「北豆腐」这行数据会把承载全部豆腐数据的节点改名。
+_STICKY_PROPS: frozenset[str] = frozenset(
+    {"summary", "provenance", "canonical_name", "category"}
+)
+
+
+def _as_float(v: Any) -> float | None:
+    """bundle item 的 field_value 是 TEXT 存的。转不动就留 None ——
+
+    None 的语义是「这条关系没有数值」，而不是 0（0 是「检出为零」，两回事）。
+    """
+    try:
+        return float(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 # ============================================================
 # 查询
 # ============================================================
@@ -54,7 +73,7 @@ def list_bundles(status: str = "pending_review", limit: int = 20) -> list[dict[s
         cur.execute(
             "SELECT b.id, b.food_key, b.canonical_name, b.english_name, b.scientific_name, "
             "       b.category, b.source_desc, b.score_total, b.source_count, b.hard_veto, "
-            "       b.status, b.canonical_id, b.created_at "
+            "       b.status, b.canonical_id, b.created_at, b.source_key "
             "FROM kg_food_bundle b WHERE b.status = %s ORDER BY b.id LIMIT %s",
             (status, limit),
         )
@@ -67,9 +86,9 @@ def get_bundle(bundle_id: int) -> dict[str, Any]:
         cur = conn.cursor()
         cur.execute(
             "SELECT id, request_id, food_key, canonical_name, english_name, scientific_name, "
-            "       category, nature, source_key, external_id, source_desc, score_total, "
-            "       score_detail, source_count, sources, hard_veto, status, canonical_id, "
-            "       reviewer, reviewed_at, reject_reason "
+            "       category, nature, aliases, source_key, external_id, source_desc, "
+            "       evidence_type, score_total, score_detail, source_count, sources, "
+            "       hard_veto, status, canonical_id, reviewer, reviewed_at, reject_reason "
             "FROM kg_food_bundle WHERE id = %s",
             (bundle_id,),
         )
@@ -135,6 +154,85 @@ def _resolve_canonical_id(conn, names: list[str]) -> tuple[str, str]:
 # ============================================================
 # 审核：bundle → 候选
 # ============================================================
+def _upsert_ingredient_candidate(
+    conn,
+    batch_id: str,
+    cid: str,
+    name: str,
+    props: dict[str, Any],
+    aliases: list[str],
+    bundle_id: int,
+    reviewer: str,
+) -> None:
+    """写 Ingredient 节点候选。**已存在时是合并，不是覆盖。**
+
+    原来这里 ON CONFLICT DO UPDATE props = EXCLUDED.props，等于用新 bundle
+    的模板值整体替换掉旧属性：一个 curated 的 summary 会被
+    「藜麦（谷物）」这种自动生成的一句话冲掉，别名也会被截断成新的三个。
+
+    现在三条规则：
+      * summary / provenance / canonical_name / category 只在旧值为空时才写入
+        —— 它们是「这个节点是谁、怎么描述」的既有结论，新数据无权改写
+      * 其他属性：新值非空才覆盖（空值表示「这张表没填」，不是「要清空」）
+      * 别名取并集
+      * 可信度只升不降：source_count 取大，provisional 取「与」
+
+    为什么名字也要保住：dict_alias 里「豆腐 / 南豆腐 / 北豆腐 / 老豆腐」
+    都指向 ING_00003。导入一行「北豆腐」如果直接把 canonical_name 改成
+    北豆腐，这个节点在问答里就从「豆腐」变成了「北豆腐」，而它承载的是
+    全部豆腐的数据 —— 显示名被一个别名劫持了。
+    """
+    old = conn.execute(
+        "SELECT props, aliases FROM kg_node_candidate "
+        "WHERE canonical_id = %s AND node_type = 'Ingredient'",
+        (cid,),
+    ).fetchone()
+
+    if old is None:
+        conn.execute(
+            """
+            INSERT INTO kg_node_candidate
+                (batch_id, node_type, canonical_id, name, props, aliases, bundle_id,
+                 status, reviewer, reviewed_at)
+            VALUES (%s, 'Ingredient', %s, %s, %s, %s, %s, 'approved', %s, now())
+            """,
+            (
+                batch_id, cid, name,
+                psycopg.types.json.Jsonb(props), aliases, bundle_id, reviewer,
+            ),
+        )
+        return
+
+    old_props = dict(old[0] or {})
+    merged = dict(old_props)
+    for k, v in props.items():
+        if k in _STICKY_PROPS:
+            # 旧值非空就以旧值为准；旧值为空才补
+            if old_props.get(k) in (None, "", [], {}):
+                if v not in (None, "", [], {}):
+                    merged[k] = v
+            continue
+        if v not in (None, "", [], {}):
+            merged[k] = v
+    merged["source_count"] = max(
+        int(old_props.get("source_count") or 0), int(props.get("source_count") or 0)
+    )
+    merged["provisional"] = bool(old_props.get("provisional", False)) and bool(
+        props.get("provisional", True)
+    )
+    merged_aliases = list(dict.fromkeys([*(old[1] or []), *aliases]))
+
+    conn.execute(
+        "UPDATE kg_node_candidate SET props = %s, aliases = %s, batch_id = %s, "
+        "  bundle_id = %s, status = 'approved', reviewer = %s, reviewed_at = now() "
+        "WHERE canonical_id = %s AND node_type = 'Ingredient'",
+        (
+            psycopg.types.json.Jsonb(merged), merged_aliases, batch_id,
+            bundle_id, reviewer, cid,
+        ),
+    )
+
+
 def approve_bundle(
     bundle_id: int,
     reviewer: str = "admin",
@@ -149,7 +247,7 @@ def approve_bundle(
         row = conn.execute(
             "SELECT food_key, canonical_name, english_name, scientific_name, category, "
             "       nature, source_desc, external_id, score_total, source_count, sources, "
-            "       hard_veto, status, request_id "
+            "       hard_veto, status, request_id, aliases, evidence_type, source_key "
             "FROM kg_food_bundle WHERE id = %s FOR UPDATE",
             (bundle_id,),
         ).fetchone()
@@ -159,7 +257,7 @@ def approve_bundle(
         (
             food_key, canonical_name, english_name, scientific_name, category,
             nature, source_desc, external_id, score_total, source_count, sources,
-            hard_veto, status, request_id,
+            hard_veto, status, request_id, bundle_aliases, evidence_type, source_key,
         ) = row
 
         if status in ("rejected", "merged"):
@@ -194,7 +292,11 @@ def approve_bundle(
         if not (fields.get("category") or category):
             raise PromoteError("缺少 category，无法建节点")
 
-        cid, basis = _resolve_canonical_id(conn, [name, food_key])
+        # 别名也参与身份判定：导入表里写「北豆腐」，别名有「老豆腐」，
+        # 若「老豆腐」已经挂在既有节点上，就该挂过去，而不是再建一个。
+        cid, basis = _resolve_canonical_id(
+            conn, [name, food_key, *(bundle_aliases or [])]
+        )
         # 「过了人工审核」和「数值被交叉验证过」是两件事：
         # 前者解决「这是不是那个东西」，后者解决「这个数对不对」。
         # 只有单一来源时，内容可信但数值未经交叉验证 → 标 provisional，检索降级引用。
@@ -204,7 +306,11 @@ def approve_bundle(
         )
         batch_id = f"bundle:{bundle_id}"
 
-        aliases = [a for a in dict.fromkeys([name, food_key, english_name]) if a]
+        aliases = [
+            a
+            for a in dict.fromkeys([name, food_key, english_name, *(bundle_aliases or [])])
+            if a
+        ]
 
         # ---------- 节点候选 ----------
         ing_props: dict[str, Any] = {
@@ -214,32 +320,22 @@ def approve_bundle(
             "summary": f"{name}（{fields.get('category') or category}）",
             "source_count": source_count,
             "provisional": provisional,
-            "provenance": f"bundle:{bundle_id} fdc:{external_id}",
+            "provenance": f"bundle:{bundle_id} {source_key or 'unknown'}:{external_id}",
         }
         if fields.get("scientific_name") or scientific_name:
             ing_props["scientific_name"] = fields.get("scientific_name") or scientific_name
         if fields.get("nature") or nature:
             ing_props["nature"] = fields.get("nature") or nature
 
-        conn.execute(
-            """
-            INSERT INTO kg_node_candidate
-                (batch_id, node_type, canonical_id, name, props, aliases, bundle_id,
-                 status, reviewer, reviewed_at)
-            VALUES (%s, 'Ingredient', %s, %s, %s, %s, %s, 'approved', %s, now())
-            ON CONFLICT (canonical_id) DO UPDATE SET
-                props = EXCLUDED.props,
-                aliases = EXCLUDED.aliases,
-                batch_id = EXCLUDED.batch_id,
-                bundle_id = EXCLUDED.bundle_id,
-                status = 'approved',
-                reviewer = EXCLUDED.reviewer,
-                reviewed_at = now()
-            """,
-            (
-                batch_id, cid, name,
-                psycopg.types.json.Jsonb(ing_props), aliases, bundle_id, reviewer,
-            ),
+        _upsert_ingredient_candidate(
+            conn,
+            batch_id=batch_id,
+            cid=cid,
+            name=name,
+            props=ing_props,
+            aliases=aliases,
+            bundle_id=bundle_id,
+            reviewer=reviewer,
         )
 
         # ---------- 边候选 ----------
@@ -251,44 +347,49 @@ def approve_bundle(
                 log.info("营养素「%s %s」不在收录范围，跳过", fname, unit)
                 continue
 
-            if ref.is_new:
-                # 能量 / 钠这类图里还没有的，按固定 id 建节点（见 kg/nutrients.py）
-                inserted = conn.execute(
-                    """
-                    INSERT INTO kg_node_candidate
-                        (batch_id, node_type, canonical_id, name, props, aliases, bundle_id,
-                         status, reviewer, reviewed_at)
-                    VALUES (%s, 'Nutrient', %s, %s, %s, '{}', NULL, 'approved', %s, now())
-                    ON CONFLICT (canonical_id) DO NOTHING
-                    RETURNING id
-                    """,
-                    (
-                        batch_id, ref.canonical_id, ref.name,
-                        psycopg.types.json.Jsonb(
-                            {"name": ref.name, "unit": ref.unit, "category": ref.category}
-                        ),
-                        reviewer,
+            # 不管新老都补一份节点候选：营养素有「共享词汇」的性质，
+            # 种子里有 20 个，但主图不一定都建过（只建过被边引用到的）。
+            # DO NOTHING 保证既有节点不被改写，缺的那个能顺手补上。
+            inserted = conn.execute(
+                """
+                INSERT INTO kg_node_candidate
+                    (batch_id, node_type, canonical_id, name, props, aliases, bundle_id,
+                     status, reviewer, reviewed_at)
+                VALUES (%s, 'Nutrient', %s, %s, %s, '{}', NULL, 'approved', %s, now())
+                ON CONFLICT (canonical_id) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    batch_id, ref.canonical_id, ref.name,
+                    psycopg.types.json.Jsonb(
+                        {"name": ref.name, "unit": ref.unit, "category": ref.category}
                     ),
-                ).fetchone()
-                if inserted:
-                    extra_nodes += 1
+                    reviewer,
+                ),
+            ).fetchone()
+            if inserted and ref.is_new:
+                extra_nodes += 1
 
             conn.execute(
                 """
                 INSERT INTO kg_candidate
                     (batch_id, src_type, src_id, rel, dst_type, dst_id, dst_name,
                      claim_text, evidence_type, evidence_level, sources, confidence,
-                     source_locator, provisional, source_count, status, reviewer, reviewed_at)
+                     source_locator, provisional, source_count, amount, unit,
+                     status, reviewer, reviewed_at)
                 VALUES (%s,'Ingredient',%s,'CONTAINS_NUTRIENT','Nutrient',%s,%s,
-                        %s,'measured',%s,%s,%s,%s,%s,%s,'approved',%s, now())
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'approved',%s, now())
                 ON CONFLICT (batch_id, src_id, rel, dst_id) DO UPDATE SET
                     claim_text = EXCLUDED.claim_text,
+                    evidence_type = EXCLUDED.evidence_type,
                     evidence_level = EXCLUDED.evidence_level,
                     sources = EXCLUDED.sources,
                     confidence = EXCLUDED.confidence,
                     source_locator = EXCLUDED.source_locator,
                     provisional = EXCLUDED.provisional,
                     source_count = EXCLUDED.source_count,
+                    amount = EXCLUDED.amount,
+                    unit = EXCLUDED.unit,
                     status = 'approved',
                     reviewer = EXCLUDED.reviewer,
                     reviewed_at = now()
@@ -296,12 +397,15 @@ def approve_bundle(
                 (
                     batch_id, cid, ref.canonical_id, ref.name,
                     f"{name}每 100g 含{ref.name} {fval} {ref.unit}",
+                    evidence_type or "measured",
                     evidence_level,
                     psycopg.types.json.Jsonb(sources or []),
                     min(1.0, float(score_total or 0.0)),
                     locator,
                     provisional,
                     source_count,
+                    _as_float(fval),
+                    ref.unit,
                     reviewer,
                 ),
             )

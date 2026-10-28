@@ -82,8 +82,13 @@ def _admin(client):
 
 
 def _food_name() -> str:
-    """2–8 个汉字，避开别名表里的常见食材。"""
-    alphabet = "甲乙丙丁戊己庚辛壬癸"
+    """2–8 个汉字，避开别名表里的常见食材。
+
+    字母表里特意不放「丁」：kg.request 的切分后缀表里有「丁」（肉丁/菜丁的丁），
+    「测丙丙丁」会被切成「测丙丙」，于是 food_key != 输入名，用例随机失败。
+    同理不放丝/片/块/泥/酱/末/馅 这些后缀字。
+    """
+    alphabet = "甲乙丙戊己庚辛壬癸"
     return "测" + "".join(secrets.choice(alphabet) for _ in range(3))
 
 
@@ -124,7 +129,7 @@ def test_admin_register_skips_user_daily_limit(client, monkeypatch):
         body = created.json()
         assert body["food_key"] == first
         assert body["status"] == "queued"
-        assert body["hit_count"] == 1
+        assert body["hit_count"] == 0
 
         again = client.post("/admin/kg/requests", json={"name": second}, headers=headers)
         assert again.status_code == 200, again.text
@@ -165,7 +170,7 @@ def test_admin_register_repeat_keeps_source_and_status(client):
         again = client.post("/admin/kg/requests", json={"name": name}, headers=headers)
         assert again.status_code == 200, again.text
         assert again.json()["id"] == request_id
-        assert again.json()["hit_count"] == 2
+        assert again.json()["hit_count"] == 0
         assert again.json()["status"] == "rejected"
 
         listed = client.get(
@@ -178,6 +183,46 @@ def test_admin_register_repeat_keeps_source_and_status(client):
         assert row["status"] == "rejected"
     finally:
         _delete_request(name)
+
+
+def test_admin_register_does_not_bump_search_count(client):
+    """前台重复提问累加次数；管理员再登记同一食物名时次数不动。"""
+    _, headers = _admin(client)
+    asked = _food_name()
+    queued = _food_name()
+    try:
+        first = register(asked, who="u-search", source="chat")
+        assert first.hit_count == 1
+        again = register(asked, who="u-search", source="chat")
+        assert again.hit_count == 2
+
+        touched = client.post("/admin/kg/requests", json={"name": asked}, headers=headers)
+        assert touched.status_code == 200, touched.text
+        assert touched.json()["id"] == first.request_id
+        assert touched.json()["hit_count"] == 2
+
+        created = client.post("/admin/kg/requests", json={"name": queued}, headers=headers)
+        assert created.status_code == 200, created.text
+        assert created.json()["hit_count"] == 0
+
+        searched = register(queued, who="u-search", source="chat")
+        assert searched.hit_count == 1
+        assert searched.request_id == created.json()["id"]
+
+        with psycopg.connect(config.PG_DSN) as conn:
+            asked_row = conn.execute(
+                "SELECT hit_count, source FROM kg_ingredient_request WHERE food_key = %s",
+                (asked,),
+            ).fetchone()
+            queued_row = conn.execute(
+                "SELECT hit_count, source FROM kg_ingredient_request WHERE food_key = %s",
+                (queued,),
+            ).fetchone()
+        assert asked_row == (2, "chat")
+        assert queued_row == (1, "admin")
+    finally:
+        _delete_request(asked)
+        _delete_request(queued)
 
 
 def test_admin_register_global_limit_is_an_error(client, monkeypatch):

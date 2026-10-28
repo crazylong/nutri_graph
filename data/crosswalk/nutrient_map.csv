@@ -1,21 +1,33 @@
-﻿canonical_id,name,unit,category
-NUT_00001,维生素C,mg,维生素
-NUT_00002,维生素A,μgRAE,维生素
-NUT_00003,维生素B1,mg,维生素
-NUT_00004,叶酸,μg,维生素
-NUT_00005,维生素K,μg,维生素
-NUT_00006,钙,mg,矿物质
-NUT_00007,铁,mg,矿物质
-NUT_00008,锌,mg,矿物质
-NUT_00009,钾,mg,矿物质
-NUT_00010,镁,mg,矿物质
-NUT_00011,膳食纤维,g,其他
-NUT_00012,蛋白质,g,宏量营养素
-NUT_00013,脂肪,g,宏量营养素
-NUT_00014,碳水化合物,g,宏量营养素
-NUT_00015,胡萝卜素,μg,植物化学物
-NUT_00016,番茄红素,mg,植物化学物
-NUT_00017,花青素,mg,植物化学物
-NUT_00018,ω-3脂肪酸,g,脂肪酸
-NUT_00019,嘌呤,mg,其他
-NUT_00020,咖啡因,mg,其他
+﻿canonical_id,name,unit,category,aliases
+NUT_00001,维生素C,mg,维生素,
+NUT_00002,维生素A,μgRAE,维生素,
+NUT_00003,维生素B1,mg,维生素,硫胺素;thiamin;vitamin b1
+NUT_00004,叶酸,μg,维生素,
+NUT_00005,维生素K,μg,维生素,
+NUT_00006,钙,mg,矿物质,
+NUT_00007,铁,mg,矿物质,
+NUT_00008,锌,mg,矿物质,
+NUT_00009,钾,mg,矿物质,
+NUT_00010,镁,mg,矿物质,
+NUT_00011,膳食纤维,g,其他,
+NUT_00012,蛋白质,g,宏量营养素,
+NUT_00013,脂肪,g,宏量营养素,
+NUT_00014,碳水化合物,g,宏量营养素,
+NUT_00015,胡萝卜素,μg,植物化学物,
+NUT_00016,番茄红素,mg,植物化学物,
+NUT_00017,花青素,mg,植物化学物,
+NUT_00018,ω-3脂肪酸,g,脂肪酸,
+NUT_00019,嘌呤,mg,其他,
+NUT_00020,咖啡因,mg,其他,
+NUT_00023,磷,mg,矿物质,phosphorus
+NUT_00024,维生素B2,mg,维生素,核黄素;riboflavin;vitamin b2
+NUT_00025,烟酸,mg,维生素,尼克酸;维生素B3;niacin;vitamin b3
+NUT_00026,硒,μg,矿物质,selenium
+NUT_00027,铜,mg,矿物质,copper
+NUT_00028,胆固醇,mg,其他,cholesterol;总胆固醇
+NUT_00029,锰,mg,矿物质,manganese
+NUT_00030,维生素E,mg,维生素,生育酚;α-生育酚;alpha-te;vitamin e
+NUT_00031,碘,μg,矿物质,iodine
+NUT_00032,饱和脂肪酸,%E,脂肪酸,sfa
+NUT_00033,单不饱和脂肪酸,%E,脂肪酸,mufa
+NUT_00034,多不饱和脂肪酸,%E,脂肪酸,pufa

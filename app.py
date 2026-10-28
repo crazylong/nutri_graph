@@ -6,6 +6,7 @@ nutri_graph —— FastAPI 入口（只做装配，不放业务逻辑）
   具体端点都在 api/ 下，一个域一个文件：
     api/auth.py     手机号验证码登录 / 令牌 / 注销
     api/admin.py    管理员（概览、候选审核），整个 router 挂 require_admin
+    api/food_import.py  公开演示：Excel 导入食物（不鉴权，只进 demo_food）
     api/chat.py     主问答
     api/history.py  历史会话与最近问法
     api/health.py   存储探活
@@ -22,6 +23,7 @@ import config
 from api.admin import router as admin_router
 from api.auth import router as auth_router
 from api.chat import router as chat_router
+from api.food_import import router as food_import_router
 from api.health import router as health_router
 from api.history import router as history_router
 from api.kg import router as kg_router
@@ -84,7 +86,7 @@ app = FastAPI(title=config.APP_NAME, lifespan=lifespan)
 
 for _router in (
     auth_router, admin_router, chat_router, history_router,
-    kg_router, health_router, system_router,
+    kg_router, food_import_router, health_router, system_router,
 ):
     app.include_router(_router)
 

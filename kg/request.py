@@ -187,8 +187,13 @@ def register(
     source: str = "chat",
     near_misses: list[dict] | None = None,
     skip_user_limit: bool = False,
+    count_hit: bool = True,
 ) -> RegisterResult:
-    """把一次「未收录」请求落到正确的出口。任何异常都不能让 /chat 500。"""
+    """把一次「未收录」请求落到正确的出口。任何异常都不能让 /chat 500。
+
+    count_hit 为 False 时不把这次写入算进需求热度：新行 hit_count 为 0，
+    已有行不改 hit_count、原话和最近提及。管理员手工登记传 False。
+    """
     if not config.FOOD_REQUEST_ENABLED:
         return RegisterResult(
             action="rejected_not_food", code="disabled",
@@ -282,18 +287,27 @@ def register(
                     )
 
             # ---- 幂等 UPSERT ----
+            # count_hit 为 False（手工登记）时新行从 0 起；
+            # 撞上已有食物名则次数、原话、最近提及都保持原样。
+            initial_hits = 1 if count_hit else 0
+            hit_delta = 1 if count_hit else 0
             row = conn.execute(
                 """
                 INSERT INTO kg_ingredient_request
-                    (food_key, raw_mention, normalized, requested_by, source, status)
-                VALUES (%s, %s, %s, %s, %s, 'queued')
+                    (food_key, raw_mention, normalized, requested_by, source, status, hit_count)
+                VALUES (%s, %s, %s, %s, %s, 'queued', %s)
                 ON CONFLICT (food_key) DO UPDATE SET
-                    hit_count         = kg_ingredient_request.hit_count + 1,
-                    last_requested_at = now(),
-                    raw_mention       = EXCLUDED.raw_mention
+                    hit_count         = kg_ingredient_request.hit_count + %s,
+                    last_requested_at = CASE WHEN %s THEN now()
+                                        ELSE kg_ingredient_request.last_requested_at END,
+                    raw_mention       = CASE WHEN %s THEN EXCLUDED.raw_mention
+                                        ELSE kg_ingredient_request.raw_mention END
                 RETURNING id, status, hit_count
                 """,
-                (term, normalize_text(raw), term, who, source),
+                (
+                    term, normalize_text(raw), term, who, source,
+                    initial_hits, hit_delta, count_hit, count_hit,
+                ),
             ).fetchone()
 
             request_id, status, hit_count = row

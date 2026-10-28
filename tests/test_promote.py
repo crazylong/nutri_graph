@@ -17,11 +17,13 @@ import pytest
 
 import config
 from kg import promote
-from kg.merge import rollback
 from kg.query import GraphQuery
 from tests.helpers import requires_neo4j, requires_pg
 
-pytestmark = [requires_pg, requires_neo4j]
+# graph：会写 Neo4j。默认被 conftest._graph_guard 跳过 ——
+# Neo4j 社区版只有一个库，测试和生产共用同一张图，这类用例必须在
+# 「确认这张图可以被清」时显式 ALLOW_GRAPH_TESTS=1 才跑。
+pytestmark = [requires_pg, requires_neo4j, pytest.mark.graph]
 
 _seq = itertools.count(1)
 _created: list[tuple[int, int]] = []      # (bundle_id, request_id)
@@ -107,28 +109,49 @@ def _make_bundle(
 @pytest.fixture(autouse=True)
 def _isolate():
     yield
-    # Neo4j：按批次回滚（删该批次建的节点与边）
-    for bid, _rid in _created:
-        try:
-            rollback(f"bundle:{bid}")
-        except Exception:  # noqa: BLE001
-            pass
-    # 测试里新建的营养素节点（无 provenance，rollback 不管它）
-    if _created:
-        try:
-            from neo4j import GraphDatabase
+    if not _created:
+        return
 
-            driver = GraphDatabase.driver(
-                config.NEO4J_URI, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD)
-            )
-            with driver.session() as s:
+    # 先把本用例真正落到的 canonical_id 查出来 —— 清理必须**按它精确删**。
+    # 不能再用 rollback(f"bundle:{bid}")：那个函数以前用 provenance CONTAINS
+    # 匹配，测试库里 bid=12 会命中生产图里的 bundle:120…129 / bundle:1200…1299，
+    # 一次清理删掉一百多个线上食材节点（2026-10-28 实际发生）。
+    batches = [f"bundle:{bid}" for bid, _ in _created]
+    cids: list[str] = []
+    with psycopg.connect(config.PG_DSN) as conn:
+        for bid, _rid in _created:
+            row = conn.execute(
+                "SELECT canonical_id FROM kg_food_bundle WHERE id = %s", (bid,)
+            ).fetchone()
+            if row and row[0]:
+                cids.append(row[0])
+
+    try:
+        from neo4j import GraphDatabase
+
+        driver = GraphDatabase.driver(
+            config.NEO4J_URI, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD)
+        )
+        with driver.session() as s:
+            # 边：batch_id 是精确字符串，安全
+            s.run(
+                "MATCH ()-[r]->() WHERE r.batch_id IN $batches DELETE r", batches=batches
+            ).consume()
+            # 节点：只删「cid 匹配且 provenance 属于本批次」的，双重限定
+            if cids:
                 s.run(
-                    "MATCH (n) WHERE n.canonical_id IN ['NUT_00021','NUT_00022'] "
-                    "AND NOT (n)<-[]-() DELETE n"
-                )
-            driver.close()
-        except Exception:  # noqa: BLE001
-            pass
+                    "MATCH (n) WHERE n.canonical_id IN $cids AND n.provenance IN $batches "
+                    "DETACH DELETE n",
+                    cids=cids, batches=batches,
+                ).consume()
+            # 测试里新建的营养素节点（无 provenance，上面两个条件都不命中）
+            s.run(
+                "MATCH (n) WHERE n.canonical_id IN ['NUT_00021','NUT_00022'] "
+                "AND NOT (n)<-[]-() DELETE n"
+            ).consume()
+        driver.close()
+    except Exception:  # noqa: BLE001 —— 图不可用时不该让清理把用例搞红
+        pass
 
     with psycopg.connect(config.PG_DSN) as conn:
         for bid, rid in _created:
@@ -152,10 +175,30 @@ def _isolate():
 def _edges(bid: int) -> list[tuple]:
     with psycopg.connect(config.PG_DSN) as conn:
         return conn.execute(
-            "SELECT dst_id, evidence_level, provisional, source_count, claim_text "
+            "SELECT dst_id, evidence_level, provisional, source_count, claim_text, "
+            "       amount, unit "
             "FROM kg_candidate WHERE batch_id = %s ORDER BY dst_id",
             (f"bundle:{bid}",),
         ).fetchall()
+
+
+def _neo4j_amount(cid: str, nid: str) -> tuple:
+    """营养边上的 amount / unit —— 表格和前端优先读这两个属性。"""
+    from neo4j import GraphDatabase
+
+    driver = GraphDatabase.driver(
+        config.NEO4J_URI, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD)
+    )
+    try:
+        with driver.session() as s:
+            row = s.run(
+                "MATCH (a {canonical_id: $cid})-[r:CONTAINS_NUTRIENT]->"
+                "(n {canonical_id: $nid}) RETURN r.amount AS a, r.unit AS u",
+                cid=cid, nid=nid,
+            ).single()
+            return (row["a"], row["u"]) if row else (None, None)
+    finally:
+        driver.close()
 
 
 def _neo4j_edges(cid: str) -> int:
@@ -192,9 +235,13 @@ def test_approve_builds_nodes_and_edges():
     assert all(x[1] == config.PROVISIONAL_EVIDENCE_LEVEL for x in rows)
     assert all(x[2] is True for x in rows)
     assert all(x[3] == 1 for x in rows)
-    # 数值必须写进 claim_text（amount 属性没落，靠断言文本承载）
+    # 数值必须写进 claim_text（给人看的断言原文）
     protein = next(x for x in rows if x[0] == "NUT_00012")
     assert "36.49" in protein[4]
+    # 同时要落到边的 amount / unit 上：前端表格和「哪个食材含铁更高」这类比较
+    # 不该再去正则解析那句中文（%E 这种单位正则根本抓不准）
+    assert (protein[5], protein[6]) == (36.49, "g")
+    assert _neo4j_amount(r["canonical_id"], "NUT_00012") == (36.49, "g")
 
 
 def test_bundle_marked_merged_and_request_approved():
