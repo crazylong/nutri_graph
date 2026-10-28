@@ -7,6 +7,8 @@ import Bundles from './views/Bundles.vue'
 import BundleDetail from './views/BundleDetail.vue'
 import Candidates from './views/Candidates.vue'
 import Aliases from './views/Aliases.vue'
+import Import from './views/Import.vue'
+import ImportJobs from './views/ImportJobs.vue'
 import { tokens } from './api'
 
 const router = createRouter({
@@ -24,6 +26,8 @@ const router = createRouter({
         { path: 'bundles/:id', component: BundleDetail },
         { path: 'candidates', component: Candidates },
         { path: 'aliases', component: Aliases },
+        { path: 'import-new', component: Import },
+        { path: 'imports', component: ImportJobs },
       ],
     },
   ],

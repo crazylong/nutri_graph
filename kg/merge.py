@@ -64,14 +64,18 @@ def _driver():
 # ============================================================
 # 节点
 # ============================================================
-def _fetch_approved_nodes(batch_id: str | None = None) -> list[dict[str, Any]]:
+def _fetch_approved_nodes(
+    batch_id: str | None = None, batch_ids: list[str] | None = None
+) -> list[dict[str, Any]]:
     with psycopg.connect(config.PG_DSN) as conn:
         cur = conn.cursor()
         sql = (
             "SELECT id, batch_id, node_type, canonical_id, name, props "
             "FROM kg_node_candidate WHERE status = 'approved'"
         )
-        if batch_id:
+        if batch_ids is not None:
+            cur.execute(sql + " AND batch_id = ANY(%s)", (batch_ids,))
+        elif batch_id:
             cur.execute(sql + " AND batch_id = %s", (batch_id,))
         else:
             cur.execute(sql)
@@ -79,9 +83,11 @@ def _fetch_approved_nodes(batch_id: str | None = None) -> list[dict[str, Any]]:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def merge_nodes(batch_id: str | None = None) -> int:
+def merge_nodes(
+    batch_id: str | None = None, batch_ids: list[str] | None = None
+) -> int:
     """把 approved 节点候选 MERGE 进主图（按 canonical_id 幂等），返回合并数量。"""
-    rows = _fetch_approved_nodes(batch_id)
+    rows = _fetch_approved_nodes(batch_id, batch_ids)
     if not rows:
         log.info("没有待合并的节点候选")
         return 0
@@ -135,7 +141,9 @@ def merge_nodes(batch_id: str | None = None) -> int:
     return len(merged_ids)
 
 
-def _fetch_approved(batch_id: str | None = None) -> list[dict[str, Any]]:
+def _fetch_approved(
+    batch_id: str | None = None, batch_ids: list[str] | None = None
+) -> list[dict[str, Any]]:
     """从候选表取待合并的 approved 边候选。"""
     cols = (
         "id, batch_id, src_id, rel, dst_id, claim_text, evidence_type, "
@@ -144,7 +152,13 @@ def _fetch_approved(batch_id: str | None = None) -> list[dict[str, Any]]:
     )
     with psycopg.connect(config.PG_DSN) as conn:
         cur = conn.cursor()
-        if batch_id:
+        if batch_ids is not None:
+            cur.execute(
+                f"SELECT {cols} FROM kg_candidate "
+                "WHERE status = 'approved' AND batch_id = ANY(%s)",
+                (batch_ids,),
+            )
+        elif batch_id:
             cur.execute(
                 f"SELECT {cols} FROM kg_candidate "
                 "WHERE status = 'approved' AND batch_id = %s",
@@ -156,12 +170,14 @@ def _fetch_approved(batch_id: str | None = None) -> list[dict[str, Any]]:
         return [dict(zip(names, row)) for row in cur.fetchall()]
 
 
-def merge(batch_id: str | None = None) -> int:
+def merge(
+    batch_id: str | None = None, batch_ids: list[str] | None = None
+) -> int:
     """把 approved 边候选 MERGE 进主图，返回合并数量。
 
     只处理边。节点请先跑 merge_nodes —— promote 里就是「先节点后边」。
     """
-    rows = _fetch_approved(batch_id)
+    rows = _fetch_approved(batch_id, batch_ids)
     if not rows:
         log.info("没有待合并的 approved 候选")
         return 0

@@ -557,22 +557,46 @@ def _index_into_milvus(canonical_id: str, aliases: list[str]) -> None:
         log.warning("Milvus 索引失败（跳过）%s：%s", canonical_id, exc)
 
 
-def merge_pending(bundle_id: int | None = None) -> dict[str, Any]:
-    """把 approved 候选合并进主图，然后写别名、推进状态。"""
+def merge_pending(
+    bundle_id: int | None = None,
+    batch_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """把 approved 候选合并进主图，然后写别名、推进状态。
+
+    两种口径：
+      * bundle_id 单独传 → 只合并 `bundle:{id}` 这一个批次（单条审核）；
+      * batch_ids 传列表 → 按多个批次范围合并（批量导入通过），不会把
+        历史无关的 approved 候选一起重处理一遍。
+    两者都不传 → 全量合并（历史兜底，脚本/CLI 用）。
+    """
     from kg import merge as merge_mod
 
-    batch_id = f"bundle:{bundle_id}" if bundle_id is not None else None
-    nodes = merge_mod.merge_nodes(batch_id)
-    edges = merge_mod.merge(batch_id)
+    if batch_ids is not None:
+        batch_list = [b for b in batch_ids if b]
+        if not batch_list:
+            return {"nodes": 0, "edges": 0, "aliases": []}
+        # 单批次走精确匹配；多批次走 ANY(%s)，仍然只碰这几批
+        nodes = merge_mod.merge_nodes(batch_ids=batch_list)
+        edges = merge_mod.merge(batch_ids=batch_list)
+    else:
+        batch_id = f"bundle:{bundle_id}" if bundle_id is not None else None
+        nodes = merge_mod.merge_nodes(batch_id)
+        edges = merge_mod.merge(batch_id)
 
     # 别名必须在节点进图之后写
     merged_nodes = []
     with psycopg.connect(config.PG_DSN) as conn:
-        if bundle_id is not None:
+        if batch_ids is not None:
+            rows = conn.execute(
+                "SELECT canonical_id, aliases, bundle_id FROM kg_node_candidate "
+                "WHERE batch_id = ANY(%s) AND node_type = 'Ingredient' AND status = 'merged'",
+                (batch_list,),
+            ).fetchall()
+        elif bundle_id is not None:
             rows = conn.execute(
                 "SELECT canonical_id, aliases, bundle_id FROM kg_node_candidate "
                 "WHERE batch_id = %s AND node_type = 'Ingredient' AND status = 'merged'",
-                (batch_id,),
+                (f"bundle:{bundle_id}",),
             ).fetchall()
         else:
             rows = conn.execute(
@@ -603,7 +627,18 @@ def merge_pending(bundle_id: int | None = None) -> dict[str, Any]:
                     (n["bundle_id"],),
                 )
 
-    if bundle_id is not None and not merged_nodes:
+    # 批量场景下：把「只建了节点候选、没有新增合并节点」的那批 bundle 也推到 merged。
+    # （比如整批都命中了既有节点，merge 后候选状态已 merged 但 bundle 还停在 approved。）
+    if batch_ids is not None:
+        with psycopg.connect(config.PG_DSN) as conn:
+            conn.execute(
+                "UPDATE kg_food_bundle SET status = 'merged' "
+                "WHERE id IN (SELECT bundle_id FROM kg_node_candidate "
+                "             WHERE batch_id = ANY(%s) AND status = 'merged') "
+                "  AND status = 'approved'",
+                (batch_list,),
+            )
+    elif bundle_id is not None and not merged_nodes:
         with psycopg.connect(config.PG_DSN) as conn:
             conn.execute(
                 "UPDATE kg_food_bundle SET status = 'merged' WHERE id = %s AND status = 'approved'",

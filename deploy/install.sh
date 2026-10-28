@@ -53,8 +53,17 @@ systemctl is-active --quiet nutri-graph \
 say "3/5 部署前端"
 mkdir -p "$WEB_ROOT/assets"
 install -m 0644 "$APP_DIR/frontend/index.html" "$WEB_ROOT/index.html"
+install -m 0644 "$APP_DIR/frontend/import.html" "$WEB_ROOT/import.html"
 install -m 0644 "$APP_DIR/frontend/assets/styles.css" "$WEB_ROOT/assets/styles.css"
 install -m 0644 "$APP_DIR/frontend/assets/app.js" "$WEB_ROOT/assets/app.js"
+install -m 0644 "$APP_DIR/frontend/assets/import.css" "$WEB_ROOT/assets/import.css"
+install -m 0644 "$APP_DIR/frontend/assets/import.js" "$WEB_ROOT/assets/import.js"
+# 导入模板（xlsx/csv 下载入口）
+if [ -d "$APP_DIR/frontend/template" ]; then
+  mkdir -p "$WEB_ROOT/template"
+  cp -a "$APP_DIR/frontend/template/." "$WEB_ROOT/template/"
+  echo "  导入模板 $WEB_ROOT/template"
+fi
 if [ -d "$APP_DIR/admin-web/dist" ]; then
   mkdir -p "$WEB_ROOT/console"
   cp -a "$APP_DIR/admin-web/dist/." "$WEB_ROOT/console/"

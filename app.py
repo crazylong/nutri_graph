@@ -21,6 +21,7 @@ from fastapi import FastAPI
 
 import config
 from api.admin import router as admin_router
+from api.admin_import import router as admin_import_router
 from api.auth import router as auth_router
 from api.chat import router as chat_router
 from api.food_import import router as food_import_router
@@ -85,7 +86,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title=config.APP_NAME, lifespan=lifespan)
 
 for _router in (
-    auth_router, admin_router, chat_router, history_router,
+    auth_router, admin_router, admin_import_router, chat_router, history_router,
     kg_router, food_import_router, health_router, system_router,
 ):
     app.include_router(_router)

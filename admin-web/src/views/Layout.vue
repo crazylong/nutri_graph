@@ -8,6 +8,8 @@
         <el-menu-item index="/bundles">补录审核</el-menu-item>
         <el-menu-item index="/candidates">候选关系</el-menu-item>
         <el-menu-item index="/aliases">疑似别名</el-menu-item>
+        <el-menu-item index="/import-new">批量导入</el-menu-item>
+        <el-menu-item index="/imports">导入记录</el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>
