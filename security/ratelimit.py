@@ -24,6 +24,8 @@ import psycopg
 
 import config
 
+import db
+
 log = logging.getLogger("security.ratelimit")
 
 
@@ -39,9 +41,6 @@ class Decision:
         return cls(allowed=True)
 
 
-def _conn():
-    return psycopg.connect(config.PG_DSN)
-
 
 def _scalar(conn, sql: str, params: tuple) -> float:
     cur = conn.cursor()
@@ -54,7 +53,7 @@ def _scalar(conn, sql: str, params: tuple) -> float:
 # 发送前检查
 # ============================================================
 def check_send(phone_hash: str, ip: str, device_fp: str) -> Decision:
-    with _conn() as conn:
+    with db.connect() as conn:
         # 1) 同号最小间隔
         elapsed = _scalar(
             conn,
@@ -155,7 +154,7 @@ def check_verify_locked(phone_hash: str, ip: str) -> Decision:
     手机号 5 次 → 锁这个号（正常用户的自我保护）
     IP 50 次     → 才认为整个出口在爆破（避免 NAT 后面互相牵连）
     """
-    with _conn() as conn:
+    with db.connect() as conn:
         phone_fails = _recent_fails(
             conn, "phone_hash = %s", (phone_hash,), config.SMS_MAX_VERIFY_FAILS
         )
@@ -185,7 +184,7 @@ def check_verify_locked(phone_hash: str, ip: str) -> Decision:
 
 def remaining_attempts(phone_hash: str, ip: str = "") -> int:
     """剩余可试次数只按手机号算 —— 用户看到的「还能试几次」应该只跟自己这个号有关。"""
-    with _conn() as conn:
+    with db.connect() as conn:
         fails = _recent_fails(
             conn, "phone_hash = %s", (phone_hash,), config.SMS_MAX_VERIFY_FAILS
         )
@@ -207,7 +206,7 @@ def record_send(
 ) -> None:
     """每次下发都记一条（成功与否都记），失败也计入频控可防止「靠失败无限重试」。"""
     try:
-        with _conn() as conn:
+        with db.connect() as conn:
             conn.execute(
                 "INSERT INTO sms_send_log "
                 "(phone_hash, ip, device_fp, purpose, provider, provider_msg_id, ok, error) "
@@ -222,7 +221,7 @@ def recent_sends_by_ip(ip: str, window_hours: int = 1) -> int:
     """某 IP 在窗口内的发送次数（含失败），用于判断是否需要图形验证码。"""
     if not ip:
         return 0
-    with _conn() as conn:
+    with db.connect() as conn:
         return int(
             _scalar(
                 conn,
@@ -235,7 +234,7 @@ def recent_sends_by_ip(ip: str, window_hours: int = 1) -> int:
 
 def record_verify(phone_hash: str, ip: str, purpose: str, ok: bool) -> None:
     try:
-        with _conn() as conn:
+        with db.connect() as conn:
             conn.execute(
                 "INSERT INTO sms_verify_attempt (phone_hash, ip, purpose, ok) "
                 "VALUES (%s, %s, %s, %s)",

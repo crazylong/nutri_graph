@@ -25,6 +25,8 @@ from neo4j import GraphDatabase
 import config
 from kg.schema import relation_key, sources_to_json
 
+import db
+
 log = logging.getLogger("kg.merge")
 
 # 关系类型 → (源 label, 目标 label)
@@ -67,7 +69,7 @@ def _driver():
 def _fetch_approved_nodes(
     batch_id: str | None = None, batch_ids: list[str] | None = None
 ) -> list[dict[str, Any]]:
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         sql = (
             "SELECT id, batch_id, node_type, canonical_id, name, props "
@@ -132,7 +134,7 @@ def merge_nodes(
         driver.close()
 
     if merged_ids:
-        with psycopg.connect(config.PG_DSN) as conn:
+        with db.connect() as conn:
             conn.execute(
                 "UPDATE kg_node_candidate SET status = 'merged' WHERE id = ANY(%s)",
                 (merged_ids,),
@@ -150,7 +152,7 @@ def _fetch_approved(
         "evidence_level, sources, confidence, source_locator, provisional, source_count, "
         "amount, unit"
     )
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         if batch_ids is not None:
             cur.execute(
@@ -246,7 +248,7 @@ def merge(
 
     # 回写候选表状态为 merged
     if merged_ids:
-        with psycopg.connect(config.PG_DSN) as conn:
+        with db.connect() as conn:
             conn.execute(
                 "UPDATE kg_candidate SET status = 'merged' WHERE id = ANY(%s)",
                 (merged_ids,),
@@ -290,7 +292,7 @@ def rollback(batch_id: str) -> int:
             deleted_nodes = result["c"] if result else 0
     finally:
         driver.close()
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         conn.execute(
             "UPDATE kg_candidate SET status = 'pending' "
             "WHERE batch_id = %s AND status = 'merged'",

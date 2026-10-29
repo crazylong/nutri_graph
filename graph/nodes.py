@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 import config
+import db
 from kg.query import GraphQuery, detect_intent, plan_queries
 from kg.normalize import EntityLinker, get_alias_store, normalize_text
 from graph.boundary import mentions_health_constraint, parse_profile_from_answer
@@ -173,7 +174,15 @@ def _load_profile(state: dict) -> dict:
         from memory.long_term import UserProfile
 
         return UserProfile().get(state.get("user_id") or "anonymous")
+    except db.PoolBusy:
+        # 池打满不能当成"这个人没有画像"。
+        # 画像空着继续走下去，过敏和忌口的排除名单就是空的 ——
+        # 用户拿到的是一条没排除过敏原的食疗建议，而且返回 200。
+        # 这里必须让它冒出去，由 app.py 的处理器变成 503。
+        raise
     except Exception as exc:  # noqa: BLE001
+        # 库真的不可用（连不上、表没建）是另一类故障：按"没有画像"继续回答，
+        # 降级的是个性化程度，不是安全性判断的那条链。
         log.warning("加载画像失败：%s", exc)
         return {}
 

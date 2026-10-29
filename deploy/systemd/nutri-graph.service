@@ -14,7 +14,11 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # --proxy-headers 让 request.client.host 取到 nginx 传的真实 IP ——
 #   短信频控和日志都依赖它，否则所有请求看起来都来自 127.0.0.1
 # --workers 1：别名缓存、模型池状态都在进程内，多 worker 会各存一份
-ExecStart=/opt/envs/nutri/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8810 --proxy-headers --forwarded-allow-ips=127.0.0.1 --workers 1
+# --limit-concurrency：必须和 config.PG_POOL_SIZE + PG_MAX_OVERFLOW 一起看。
+#   并发 10 条在途请求 ≈ 10 条连接，池 10+5=15 里剩下的 5 条留给后台线程
+#   （画像抽取、会话摘要不受这个限制，同样要取连接）。
+#   只改 config 里的 UVICORN_LIMIT_CONCURRENCY 没用，这个值只在这里生效。
+ExecStart=/opt/envs/nutri/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8810 --proxy-headers --forwarded-allow-ips=127.0.0.1 --workers 1 --limit-concurrency 10
 Restart=always
 RestartSec=3
 TimeoutStopSec=20

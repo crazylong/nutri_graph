@@ -25,6 +25,8 @@ import psycopg
 import config
 from security.crypto import hmac_hex, new_numeric_code, pepper, phone_hash, phone_mask
 
+import db
+
 log = logging.getLogger("security.sms")
 
 
@@ -71,7 +73,7 @@ class ConsoleProvider(SmsProvider):
     def send(self, phone: str, purpose: str = "login") -> SendResult:
         code = new_numeric_code(config.SMS_CODE_LENGTH)
         code_hash = self._code_hash(phone, purpose, code)
-        with psycopg.connect(config.PG_DSN) as conn:
+        with db.connect() as conn:
             conn.execute(
                 "INSERT INTO sms_code (phone_hash, code_hash, purpose, expires_at) "
                 "VALUES (%s, %s, %s, now() + (%s || ' seconds')::interval)",
@@ -89,7 +91,7 @@ class ConsoleProvider(SmsProvider):
 
     def verify(self, phone: str, code: str, purpose: str = "login") -> tuple[bool, str]:
         ph = phone_hash(phone)
-        with psycopg.connect(config.PG_DSN) as conn:
+        with db.connect() as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT id, code_hash FROM sms_code "

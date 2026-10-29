@@ -14,6 +14,8 @@ from psycopg.types.json import Jsonb
 
 import config
 
+import db
+
 # 侧栏标题只取首问的前若干字，不再为标题打模型。
 SESSION_TITLE_CHARS = 40
 SESSION_LIST_LIMIT = 50
@@ -30,15 +32,14 @@ def _json_card(card: dict | None) -> dict:
 
 class ShortTermMemory:
     def __init__(self, dsn: str = None):
+        # 保留 dsn 参数只为兼容旧签名。连接一律走 db.connect()（池按 config.PG_DSN 建），
+        # 传别的 DSN 不会生效 —— 需要连别的库就别复用这个类。
         self.dsn = dsn or config.PG_DSN
-
-    def _conn(self):
-        return psycopg.connect(self.dsn)
 
     def create_session(self, user_id: str) -> str:
         """总是新开一会话。不复用 ended_at 为空的旧会话。"""
         sid = str(uuid.uuid4())
-        with self._conn() as conn:
+        with db.connect() as conn:
             conn.execute(
                 "INSERT INTO session (id, user_id) VALUES (%s, %s)",
                 (sid, user_id),
@@ -51,7 +52,7 @@ class ShortTermMemory:
             sid = str(uuid.UUID(str(session_id)))
         except (ValueError, AttributeError, TypeError):
             return False
-        with self._conn() as conn:
+        with db.connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM session WHERE id = %s AND user_id = %s",
                 (sid, user_id),
@@ -61,7 +62,7 @@ class ShortTermMemory:
     def load_context(self, session_id: str, n: int = None) -> str:
         """加载最近 N 轮消息作为上下文。"""
         n = n or config.SHORT_TERM_WINDOW
-        with self._conn() as conn:
+        with db.connect() as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT role, content FROM message WHERE session_id = %s "
@@ -79,7 +80,7 @@ class ShortTermMemory:
         card: dict | None = None,
     ) -> None:
         title = " ".join((question or "").split())[:SESSION_TITLE_CHARS]
-        with self._conn() as conn:
+        with db.connect() as conn:
             conn.execute(
                 "INSERT INTO message (session_id, role, content) VALUES (%s, 'user', %s)",
                 (session_id, question),
@@ -98,7 +99,7 @@ class ShortTermMemory:
 
     def list_sessions(self, user_id: str, limit: int = SESSION_LIST_LIMIT) -> list[dict[str, Any]]:
         """按最后一条消息时间倒序。没有消息时用 started_at。"""
-        with self._conn() as conn:
+        with db.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT s.id::text,
@@ -130,7 +131,7 @@ class ShortTermMemory:
         """不是本人的会话返回 None，调用方回 404。"""
         if not self.owns(user_id, session_id):
             return None
-        with self._conn() as conn:
+        with db.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT id, role, content, created_at, meta
@@ -164,7 +165,7 @@ class ShortTermMemory:
         """把补算出来的子图写回这条回答，下次打开不用再查图。"""
         if not self.owns(user_id, session_id):
             return
-        with self._conn() as conn:
+        with db.connect() as conn:
             conn.execute(
                 """
                 UPDATE message SET meta = %s
@@ -175,7 +176,7 @@ class ShortTermMemory:
 
     def recent_questions(self, user_id: str, limit: int = RECENT_QUESTION_LIMIT) -> list[dict[str, Any]]:
         """最近的用户原话。点一下是再问一句，不是打开旧会话。"""
-        with self._conn() as conn:
+        with db.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT m.content, m.created_at, s.id::text
@@ -194,14 +195,14 @@ class ShortTermMemory:
 
     def summarize_if_needed(self, session_id: str, summarize_fn) -> None:
         """超长时滚动摘要（summarize_fn(history) -> summary）。"""
-        with self._conn() as conn:
+        with db.connect() as conn:
             cur = conn.cursor()
             cur.execute("SELECT count(*) FROM message WHERE session_id = %s", (session_id,))
             n = cur.fetchone()[0]
         if n >= config.SESSION_SUMMARY_THRESHOLD:
             history = self.load_context(session_id, config.SESSION_SUMMARY_THRESHOLD)
             summary = summarize_fn(history) if summarize_fn else history[:200]
-            with self._conn() as conn:
+            with db.connect() as conn:
                 conn.execute(
                     "UPDATE session SET summary = %s WHERE id = %s", (summary, session_id)
                 )

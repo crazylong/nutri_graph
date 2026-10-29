@@ -12,6 +12,8 @@ import psycopg
 
 import config
 
+import db
+
 
 _ARRAY_FIELDS = ("allergies", "conditions", "avoid_list", "hobbies", "symptoms")
 _SCALAR_FIELDS = ("diet_style", "age", "gender", "height_cm", "weight_kg")
@@ -46,10 +48,16 @@ class UserProfile:
     """用户画像：过敏 / 慢病 / 忌口，加上人口学与症状。"""
 
     def __init__(self, dsn: str = None):
+        # 同 ShortTermMemory：dsn 只留兼容，实际连的是 db.connect() 的池
+        # （按 config.PG_DSN 建）。传别的库不会生效。
         self.dsn = dsn or config.PG_DSN
+        if dsn and dsn != config.PG_DSN:
+            log.warning(
+                "UserProfile 收到与 config.PG_DSN 不同的 DSN，仍会连 config.PG_DSN"
+            )
 
     def get(self, user_id: str) -> dict[str, Any]:
-        with psycopg.connect(self.dsn) as conn:
+        with db.connect() as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT allergies, conditions, diet_style, avoid_list, "
@@ -102,7 +110,7 @@ class UserProfile:
             f"VALUES (%s, {placeholders}) "
             f"ON CONFLICT (user_id) DO UPDATE SET {', '.join(assignments)}, updated_at = now()"
         )
-        with psycopg.connect(self.dsn) as conn:
+        with db.connect() as conn:
             conn.execute(sql, params)
 
 
@@ -127,7 +135,7 @@ class LongTermMemory:
         emb = None
         if self.embedding_fn:
             emb = self.embedding_fn(content)
-        with psycopg.connect(self.dsn) as conn:
+        with db.connect() as conn:
             conn.execute(
                 "INSERT INTO memory_fact (user_id, fact_type, content, embedding, confidence) "
                 "VALUES (%s, %s, %s, %s, %s)",
@@ -139,7 +147,7 @@ class LongTermMemory:
             return []
         top_k = top_k or config.MEMORY_FACT_TOP_K
         qvec = self.embedding_fn(query)
-        with psycopg.connect(self.dsn) as conn:
+        with db.connect() as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT content FROM memory_fact WHERE user_id = %s "

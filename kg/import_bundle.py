@@ -34,6 +34,8 @@ from psycopg.types.json import Jsonb
 import config
 from kg import importer
 
+import db
+
 log = logging.getLogger("kg.import_bundle")
 
 # 导入来源的固定标识。抓取是 usda_fdc，将来接中国食物成分表离线包可以另起一个，
@@ -222,7 +224,7 @@ def stage_bundles(
         return []
 
     out: list[dict] = []
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         for r in todo:
             out.append(
                 _stage_one(conn, r.payload, job_id, filename, r.row_no, r.verdict, source_key)
@@ -262,7 +264,7 @@ def list_import_bundles(
         args.append(status.strip())
     clause = " AND ".join(where)
 
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(f"SELECT count(*) FROM kg_food_bundle b WHERE {clause}", args)
         total = int(cur.fetchone()[0])

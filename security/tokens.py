@@ -21,6 +21,8 @@ import psycopg
 import config
 from security.crypto import jwt_secret, new_token, sha256_hex
 
+import db
+
 log = logging.getLogger("security.tokens")
 
 
@@ -35,9 +37,6 @@ class TokenReuseError(InvalidTokenError):
 def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
-
-def _dsn():
-    return psycopg.connect(config.PG_DSN)
 
 
 # ============================================================
@@ -96,7 +95,7 @@ def issue_tokens(user_id: str, role: str) -> dict:
     """登录成功：新建一个 family，签发 access + refresh。"""
     expires_at = _now() + dt.timedelta(days=config.REFRESH_TTL_D)
     family_id = str(uuid.uuid4())
-    with _dsn() as conn:
+    with db.connect() as conn:
         refresh, _ = _store_refresh(conn, user_id, family_id, expires_at)
     access, ttl = make_access(user_id, role)
     return {
@@ -118,7 +117,7 @@ def rotate_refresh(raw_refresh: str) -> dict:
     reuse_family: str | None = None
     issued: tuple[str, str, str] | None = None
 
-    with _dsn() as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT jti, user_id, family_id, expires_at, revoked_at, replaced_by "
@@ -180,7 +179,7 @@ def rotate_refresh(raw_refresh: str) -> dict:
 
 def revoke_refresh(raw_refresh: str) -> None:
     """登出：只吊销这一条（不动 family，避免影响用户其他设备）。"""
-    with _dsn() as conn:
+    with db.connect() as conn:
         conn.execute(
             "UPDATE refresh_token SET revoked_at = now() "
             "WHERE token_hash = %s AND revoked_at IS NULL",
@@ -190,7 +189,7 @@ def revoke_refresh(raw_refresh: str) -> None:
 
 def revoke_all_for_user(user_id: str) -> int:
     """注销账号 / 强制下线：吊销该用户全部 refresh。"""
-    with _dsn() as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(
             "UPDATE refresh_token SET revoked_at = now() "

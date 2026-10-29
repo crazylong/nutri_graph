@@ -38,6 +38,8 @@ import config
 from kg import nutrients as nut_mod
 from kg.normalize import normalize_text
 
+import db
+
 log = logging.getLogger("kg.promote")
 
 
@@ -68,7 +70,7 @@ def _as_float(v: Any) -> float | None:
 # 查询
 # ============================================================
 def list_bundles(status: str = "pending_review", limit: int = 20) -> list[dict[str, Any]]:
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT b.id, b.food_key, b.canonical_name, b.english_name, b.scientific_name, "
@@ -82,7 +84,7 @@ def list_bundles(status: str = "pending_review", limit: int = 20) -> list[dict[s
 
 
 def get_bundle(bundle_id: int) -> dict[str, Any]:
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT id, request_id, food_key, canonical_name, english_name, scientific_name, "
@@ -243,7 +245,7 @@ def approve_bundle(
 
     item_ids 传了就只采用这些项（逐条审核）；不传则采用除 rejected 之外的全部。
     """
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         row = conn.execute(
             "SELECT food_key, canonical_name, english_name, scientific_name, category, "
             "       nature, source_desc, external_id, score_total, source_count, sources, "
@@ -437,7 +439,7 @@ def reject_bundle(bundle_id: int, reviewer: str = "admin", reason: str = "") -> 
     """驳回。同时把抓取任务和登记请求一起关掉 —— 否则它明天又被抓一遍。"""
     if not reason:
         raise PromoteError("驳回必须写原因（三个月后你会想知道为什么）")
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         row = conn.execute(
             "SELECT request_id, status FROM kg_food_bundle WHERE id = %s FOR UPDATE",
             (bundle_id,),
@@ -489,7 +491,7 @@ def sync_aliases(
     written, skipped = [], []
     norm_map = {normalize_text(a): a for a in aliases if normalize_text(a)}
 
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         for norm, raw in norm_map.items():
             row = conn.execute(
                 "SELECT canonical_id FROM dict_alias "
@@ -527,7 +529,7 @@ def _index_into_milvus(canonical_id: str, aliases: list[str]) -> None:
     Milvus 不可用时静默跳过（向量兜底是增强，不是主链路，不能因它阻断审核）。
     """
     try:
-        with psycopg.connect(config.PG_DSN) as conn:
+        with db.connect() as conn:
             row = conn.execute(
                 "SELECT props->>'provisional', name FROM kg_node_candidate "
                 "WHERE canonical_id = %s AND node_type = 'Ingredient'",
@@ -585,7 +587,7 @@ def merge_pending(
 
     # 别名必须在节点进图之后写
     merged_nodes = []
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         if batch_ids is not None:
             rows = conn.execute(
                 "SELECT canonical_id, aliases, bundle_id FROM kg_node_candidate "
@@ -616,7 +618,7 @@ def merge_pending(
         # 未审核数据就通过向量兜底进了上下文（Cypher 的 provisional 过滤管不到这里）。
         _index_into_milvus(n["canonical_id"], n["aliases"])
         if n["bundle_id"]:
-            with psycopg.connect(config.PG_DSN) as conn:
+            with db.connect() as conn:
                 conn.execute(
                     "UPDATE kg_food_bundle SET status = 'merged' WHERE id = %s",
                     (n["bundle_id"],),
@@ -630,7 +632,7 @@ def merge_pending(
     # 批量场景下：把「只建了节点候选、没有新增合并节点」的那批 bundle 也推到 merged。
     # （比如整批都命中了既有节点，merge 后候选状态已 merged 但 bundle 还停在 approved。）
     if batch_ids is not None:
-        with psycopg.connect(config.PG_DSN) as conn:
+        with db.connect() as conn:
             conn.execute(
                 "UPDATE kg_food_bundle SET status = 'merged' "
                 "WHERE id IN (SELECT bundle_id FROM kg_node_candidate "
@@ -639,7 +641,7 @@ def merge_pending(
                 (batch_list,),
             )
     elif bundle_id is not None and not merged_nodes:
-        with psycopg.connect(config.PG_DSN) as conn:
+        with db.connect() as conn:
             conn.execute(
                 "UPDATE kg_food_bundle SET status = 'merged' WHERE id = %s AND status = 'approved'",
                 (bundle_id,),

@@ -25,6 +25,8 @@ from fastapi.security import OAuth2PasswordBearer
 import config
 from security.tokens import InvalidTokenError, decode_access, decode_anon
 
+import db
+
 log = logging.getLogger("api.deps")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token", auto_error=False)
@@ -47,7 +49,7 @@ def client_ip(request: Request) -> str:
 
 
 def load_user(user_id: str) -> dict | None:
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT user_id, phone_mask, role, status FROM app_user WHERE user_id = %s",

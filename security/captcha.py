@@ -24,6 +24,8 @@ import psycopg
 import config
 from security.crypto import hmac_hex, pepper
 
+import db
+
 log = __import__("logging").getLogger("security.captcha")
 
 
@@ -85,7 +87,7 @@ def generate() -> Captcha:
     challenge_id = secrets.token_urlsafe(18)
     svg = _make_svg(question)
 
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         conn.execute(
             "INSERT INTO captcha_challenge (challenge_id, answer_hash, expires_at) "
             "VALUES (%s, %s, now() + (%s || ' seconds')::interval)",
@@ -110,7 +112,7 @@ def verify(challenge_id: str, answer: str) -> tuple[bool, str]:
     if not challenge_id or not answer:
         return False, "图形验证码不能为空"
 
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT id, answer_hash, attempts, consumed_at, expires_at "

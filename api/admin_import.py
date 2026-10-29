@@ -34,6 +34,8 @@ import config
 from api.deps import require_admin
 from kg import importer, import_bundle, promote
 
+import db
+
 log = logging.getLogger("api.admin_import")
 
 router = APIRouter(
@@ -111,7 +113,7 @@ def meta():
 # ============================================================
 def _quota_used(admin_id: str) -> int:
     """这个管理员 24 小时内已经导过几次。"""
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         cur = conn.cursor()
         cur.execute(
@@ -156,7 +158,7 @@ async def preview(
     summary = importer.summarize(results)
     job_id = uuid.uuid4()
 
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         cur = conn.cursor()
         cur.execute(
@@ -219,7 +221,7 @@ def commit(job_id: str, admin: dict = Depends(require_admin)):
     except (ValueError, AttributeError) as exc:
         raise _bad("批次号格式不对", code="bad_job_id", status=404) from exc
 
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         cur = conn.cursor()
         cur.execute(
@@ -259,7 +261,7 @@ def commit(job_id: str, admin: dict = Depends(require_admin)):
     ]
     staged = import_bundle.stage_bundles(results, jid, filename or "")
 
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         conn.execute(
             "UPDATE kg_import_job SET status = 'committed', committed_at = now() "
             "WHERE job_id = %s",
@@ -296,7 +298,7 @@ def approve_job(job_id: str, admin: dict = Depends(require_admin)):
     except (ValueError, AttributeError) as exc:
         raise _bad("批次号格式不对", code="bad_job_id", status=404) from exc
 
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         cur = conn.cursor()
         cur.execute(
@@ -352,7 +354,7 @@ def list_jobs(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         cur = conn.cursor()
         cur.execute(
@@ -382,7 +384,7 @@ def get_job(job_id: str):
     except (ValueError, AttributeError) as exc:
         raise _bad("批次号格式不对", code="bad_job_id", status=404) from exc
 
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         cur = conn.cursor()
         cur.execute(

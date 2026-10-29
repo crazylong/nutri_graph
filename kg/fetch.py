@@ -27,6 +27,8 @@ from kg import usda
 from kg.usda import UsdaClient, UsdaError
 from kg.verify import verify
 
+import db
+
 log = logging.getLogger("kg.fetch")
 
 MAX_ATTEMPTS = 3
@@ -101,7 +103,7 @@ RETURNING t.id, t.request_id, t.food_key, t.attempts
 
 
 def budget_used_today() -> int:
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         row = conn.execute(
             "SELECT count(*) FROM kg_fetch_task WHERE budget_day = CURRENT_DATE "
             "AND status IN ('running', 'done', 'failed')"
@@ -114,7 +116,7 @@ def recover_stale(minutes: int = 15) -> int:
 
     没有这一步，BackgroundTasks 一旦随进程退出，那些任务会永远卡在 running。
     """
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         cur = conn.execute(
             "UPDATE kg_fetch_task SET status = 'queued' "
             "WHERE status = 'running' AND started_at < now() - (%s || ' minutes')::interval "
@@ -129,7 +131,7 @@ def recover_stale(minutes: int = 15) -> int:
 
 def _claim(task_id: int | None) -> dict | None:
     sql = _CLAIM_SQL.format(id_filter="AND id = %(task_id)s" if task_id else "")
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         params = {"task_id": task_id} if task_id else {}
         row = conn.execute(sql, params).fetchone()
     if row is None:
@@ -138,7 +140,7 @@ def _claim(task_id: int | None) -> dict | None:
 
 
 def _finish(task_id: int, status: str, error: str = "", retry_in_h: float | None = None) -> None:
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         if retry_in_h is not None:
             conn.execute(
                 "UPDATE kg_fetch_task SET status = %s, last_error = %s, "
@@ -154,7 +156,7 @@ def _finish(task_id: int, status: str, error: str = "", retry_in_h: float | None
 
 
 def _set_request_status(request_id: int, status: str) -> None:
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         conn.execute(
             "UPDATE kg_ingredient_request SET status = %s WHERE id = %s",
             (status, request_id),
@@ -201,7 +203,7 @@ def _persist(
         }
     ]
 
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         # 重跑覆盖：先删旧 bundle（items 靠外键级联）
         conn.execute("DELETE FROM kg_food_bundle WHERE request_id = %s", (task["request_id"],))
         row = conn.execute(

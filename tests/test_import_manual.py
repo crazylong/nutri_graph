@@ -9,6 +9,30 @@ tests/test_import_manual.py —— 手工录入接口（POST /kg/import/manual�
 """
 from __future__ import annotations
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_manual_quota():
+    """额度是「IP × 24 小时」计数的，会跨轮累积。
+
+    一天里跑上六七遍全量用例，`kg_import_job` 里就攒够 40 条，
+    于是整组用例集体 429 —— 看起来像接口坏了，其实是上一轮留下的计数。
+    每条用例前清掉 TestClient 这个 IP 的计数（`testclient` 在真实库里不存在，
+    不会误删生产数据）。
+    """
+    import db
+
+    try:
+        with db.connect() as conn:
+            conn.execute(
+                "DELETE FROM kg_import_job WHERE client_ip = 'testclient' "
+                "AND source_key = 'manual_entry'"
+            )
+    except Exception:  # noqa: BLE001 —— 表还没建时不影响后面的用例
+        pass
+    yield
+
 
 def _ok_payload(**over):
     base = {

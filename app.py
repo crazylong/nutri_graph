@@ -18,8 +18,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 import config
+import db
 from api.admin import router as admin_router
 from api.admin_import import router as admin_import_router
 from api.auth import router as auth_router
@@ -80,10 +82,34 @@ def _startup_report() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _startup_report()
-    yield
+    # 池是惰性建的（测试没有 lifespan），这里只是提前建好 + 探活，
+    # 让"连不上库"在启动日志里就暴露，而不是等第一个请求。
+    ok = db.ping()
+    log.info(
+        "连接池启动探活：%s（并发上限 %s / 池上限 %s）",
+        "通过" if ok else "失败",
+        config.UVICORN_LIMIT_CONCURRENCY,
+        config.PG_POOL_SIZE + config.PG_MAX_OVERFLOW,
+    )
+    try:
+        yield
+    finally:
+        db.dispose()
 
 
 app = FastAPI(title=config.APP_NAME, lifespan=lifespan)
+
+
+@app.exception_handler(db.PoolBusy)
+async def _pool_busy_handler(_request, exc: db.PoolBusy):
+    """池打满：明确告诉调用方"忙"，而不是悬挂到超时后 500。"""
+    log.warning("数据库连接池打满：%s", exc)
+    # 包一层 detail：全站其它错误都是 {"detail": {"code": ..., "message": ...}}，
+    # 前端按同一个形状解析，不为这一类错误开特例。
+    return JSONResponse(
+        status_code=503,
+        content={"detail": {"code": "pool_busy", "message": "系统繁忙，请稍后再试"}},
+    )
 
 for _router in (
     auth_router, admin_router, admin_import_router, chat_router, history_router,
@@ -95,4 +121,14 @@ for _router in (
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app:app", host=config.HOST, port=config.PORT, reload=config.DEBUG)
+    # limit_concurrency 必须显式带：config.UVICORN_LIMIT_CONCURRENCY 只被日志读，
+    # 不带这个参数时同步端点会进 anyio 默认约 40 个线程，池只有 15 条，
+    # 多出来的请求会在 pool_timeout 后 503。生产环境这个值由 systemd 的
+    # ExecStart 提供（deploy/systemd/nutri-graph.service），这里是本地跑法。
+    uvicorn.run(
+        "app:app",
+        host=config.HOST,
+        port=config.PORT,
+        reload=config.DEBUG,
+        limit_concurrency=config.UVICORN_LIMIT_CONCURRENCY,
+    )

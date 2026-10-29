@@ -28,6 +28,8 @@ from typing import Any
 import config
 from kg.textsim import char_similarity
 
+import db
+
 log = logging.getLogger("kg.normalize")
 
 _alias_store: "AliasStore | None" = None
@@ -90,16 +92,17 @@ class AliasStore:
     """dict_alias 表的读写封装。"""
 
     def __init__(self, dsn: str):
+        # dsn 只保留兼容：连接一律走 db.connect()（池按 config.PG_DSN 建）。
+        # 传别的库不会生效 —— 需要连别的库就别复用这个类。
+        if dsn != config.PG_DSN:
+            log.warning(
+                "AliasStore 收到与 config.PG_DSN 不同的 DSN，仍会连 config.PG_DSN"
+            )
         self.dsn = dsn
         self._cache: list[dict[str, Any]] | None = None
 
-    def _conn(self):
-        import psycopg
-
-        return psycopg.connect(self.dsn)
-
     def exact_lookup(self, alias_norm: str, entity_type: str | None = None) -> list[dict]:
-        with self._conn() as conn:
+        with db.connect() as conn:
             cur = conn.cursor()
             if entity_type:
                 cur.execute(
@@ -127,7 +130,7 @@ class AliasStore:
         """
         if self._cache is not None and not refresh:
             return self._cache
-        with self._conn() as conn:
+        with db.connect() as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT entity_type, canonical_id, alias, alias_norm, confidence FROM dict_alias"
@@ -150,7 +153,7 @@ class AliasStore:
         ⚠️ 对中文实测无效（黑大豆 vs 黑豆 = 0.000），中文请用 fuzzy_lookup。
         保留它是给英文名 / 拼音这类拉丁串用的。
         """
-        with self._conn() as conn:
+        with db.connect() as conn:
             cur = conn.cursor()
             if entity_type:
                 cur.execute(
@@ -205,7 +208,7 @@ class AliasStore:
             再问一次就该指向新节点；用 DO NOTHING 会让第一条建议永久生效。
           - 但已经人工确认过的结论不能被后来的启发式覆盖 —— 那是审核意见，不是缓存。
         """
-        with self._conn() as conn:
+        with db.connect() as conn:
             conn.execute(
                 "INSERT INTO dict_alias_candidate "
                 "(entity_type, alias, alias_norm, suggested_canonical_id) "

@@ -44,6 +44,26 @@ PG_DSN = os.getenv(
 )
 PGVECTOR_DIM = int(os.getenv("PGVECTOR_DIM", "1024"))
 
+# ------------------------------------------------------------
+# 连接池（db/engine.py 用它；SQLAlchemy 只做池，SQL 一行不改）
+#
+# ⚠️ PG_POOL_SIZE + PG_MAX_OVERFLOW 必须和 UVICORN_LIMIT_CONCURRENCY 一起看：
+#    并发 10 条在途请求 ≈ 10 条连接，剩下的 5 条留给后台线程
+#    （画像抽取 _defer_profile、摘要 compress_if_needed —— 它们不受
+#    --limit-concurrency 限制，同样要取连接）。
+#    改一个必须看另一个。--limit-concurrency 要写进 systemd 的 ExecStart，
+#    只改这个配置项启动命令不会读。
+# ------------------------------------------------------------
+PG_POOL_SIZE = int(os.getenv("PG_POOL_SIZE", "10"))
+PG_MAX_OVERFLOW = int(os.getenv("PG_MAX_OVERFLOW", "5"))
+PG_POOL_TIMEOUT = int(os.getenv("PG_POOL_TIMEOUT", "3"))
+# 新建**物理**连接的超时。pool_timeout 只管"池里没空闲连接时等多久"，
+# 管不到开新连接这一步；不设的话数据库不响应会堵到 OS 的 TCP 超时。
+PG_CONNECT_TIMEOUT = int(os.getenv("PG_CONNECT_TIMEOUT", "3"))
+PG_POOL_RECYCLE = int(os.getenv("PG_POOL_RECYCLE", "1800"))
+PG_POOL_PRE_PING = os.getenv("PG_POOL_PRE_PING", "true").lower() == "true"
+UVICORN_LIMIT_CONCURRENCY = int(os.getenv("UVICORN_LIMIT_CONCURRENCY", "10"))
+
 # ============================================================
 # DashScope（LLM + Embedding）
 # ============================================================

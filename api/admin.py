@@ -20,6 +20,8 @@ from pydantic import BaseModel, Field
 import config
 from api.deps import require_admin
 
+import db
+
 log = logging.getLogger("api.admin")
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -48,7 +50,7 @@ class ApproveBundleRequest(BaseModel):
 @router.get("/stats")
 def stats():
     """只依赖 migrations 建的表，任何时候都能用。"""
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute("SELECT status, count(*) FROM app_user GROUP BY status")
         users = {row[0]: row[1] for row in cur.fetchall()}
@@ -116,7 +118,7 @@ def list_candidates(
     status: str = Query("pending", pattern="^(pending|approved|rejected|merged)$"),
     limit: int = Query(50, ge=1, le=500),
 ):
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         if not _table_exists(conn, "kg_candidate"):
             raise HTTPException(
                 status_code=503,
@@ -135,7 +137,7 @@ def list_candidates(
 
 
 def _set_status(candidate_id: int, status: str, reviewer: str, reason: str = "") -> dict:
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         if not _table_exists(conn, "kg_candidate"):
             raise HTTPException(
                 status_code=503,
@@ -192,7 +194,7 @@ def list_bundles(
     ),
     limit: int = Query(50, ge=1, le=200),
 ):
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         _require_bundle_table(conn)
     from kg import promote
 
@@ -309,7 +311,7 @@ def list_food_requests(
         pat = _like(keyword.strip())
         args.extend([pat, pat, pat])
     clause = " AND ".join(where)
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
         cur = conn.cursor()
         cur.execute(f"SELECT count(*) FROM kg_ingredient_request WHERE {clause}", args)
@@ -327,7 +329,7 @@ def list_food_requests(
 
 @router.get("/kg/requests/{request_id}")
 def get_food_request(request_id: int):
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
         cur = conn.cursor()
         cur.execute(
@@ -348,7 +350,7 @@ def get_food_request(request_id: int):
 @router.post("/kg/requests/{request_id}/reject")
 def reject_food_request(request_id: int, req: RejectRequest):
     """驳回未收录登记。理由可以空，空也写成空字符串。"""
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
         cur = conn.cursor()
         cur.execute(
@@ -415,7 +417,7 @@ def list_alias_candidates(
     """疑似别名只读。status 以库里的当前值为准，补录合并可能已把它改成 approved。"""
     where = "TRUE" if not status else "status = %s"
     args: list = [status] if status else []
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         _require_named_table(conn, "dict_alias_candidate", _ALIAS_CANDIDATE_MISSING)
         cur = conn.cursor()
         cur.execute(f"SELECT count(*) FROM dict_alias_candidate WHERE {where}", args)

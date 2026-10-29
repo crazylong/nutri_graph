@@ -16,13 +16,12 @@ import psycopg
 
 import config
 
+import db
 
-def _conn():
-    return psycopg.connect(config.PG_DSN)
 
 
 def cmd_list(args):
-    with _conn() as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT id, src_id, rel, dst_id, dst_name, claim_text, evidence_type, "
@@ -43,7 +42,7 @@ def cmd_list(args):
 
 def cmd_approve(args):
     ids = [int(x) for x in args.ids.split(",") if x.strip()]
-    with _conn() as conn:
+    with db.connect() as conn:
         conn.execute(
             "UPDATE kg_candidate SET status = 'approved', reviewer = %s, reviewed_at = now() "
             "WHERE id = ANY(%s)",
@@ -54,7 +53,7 @@ def cmd_approve(args):
 
 def cmd_reject(args):
     ids = [int(x) for x in args.ids.split(",") if x.strip()]
-    with _conn() as conn:
+    with db.connect() as conn:
         conn.execute(
             "UPDATE kg_candidate SET status = 'rejected', reviewer = %s, reviewed_at = now() "
             "WHERE id = ANY(%s)",
@@ -64,7 +63,7 @@ def cmd_reject(args):
 
 
 def cmd_stats(args):
-    with _conn() as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute("SELECT status, count(*) FROM kg_candidate GROUP BY status ORDER BY status")
         rows = cur.fetchall()

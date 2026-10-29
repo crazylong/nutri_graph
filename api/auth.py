@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 import config
+import db
 from api.deps import client_ip, get_current_user, get_principal
 from memory.anonymous_merge import merge_anon_into_user
 from security import captcha, ratelimit
@@ -108,7 +109,7 @@ def _upsert_user(phone: str) -> dict:
     ph = phone_hash(phone)
     enc = encrypt_phone(phone)
     mask = phone_mask(phone)
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO app_user (phone_enc, phone_hash, phone_mask) VALUES (%s, %s, %s) "
@@ -133,7 +134,7 @@ def _upsert_user(phone: str) -> dict:
 
 def _grant_admin(user_id: str) -> None:
     """管理后台登录直接给 admin。问答登录不走这里。"""
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         conn.execute(
             "UPDATE app_user SET role = 'admin' WHERE user_id = %s",
             (user_id,),
@@ -144,7 +145,7 @@ def _record_consent(user_id: str, version: str, ip: str) -> None:
     if not version:
         return
     try:
-        with psycopg.connect(config.PG_DSN) as conn:
+        with db.connect() as conn:
             conn.execute(
                 "INSERT INTO user_consent (user_id, policy_version, ip) VALUES (%s, %s, %s) "
                 "ON CONFLICT (user_id, policy_version) DO NOTHING",
@@ -390,7 +391,7 @@ def delete_me(user: dict = Depends(get_current_user)):
     uid = user["user_id"]
     revoke_all_for_user(uid)
     purged = {}
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         for table, sql in {
             "user_profile": "DELETE FROM user_profile WHERE user_id = %s",
             "memory_fact": "DELETE FROM memory_fact WHERE user_id = %s",

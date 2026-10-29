@@ -32,6 +32,8 @@ import config
 from api.deps import client_ip
 from kg import importer, import_bundle
 
+import db
+
 log = logging.getLogger("api.food_import")
 
 router = APIRouter(prefix="/kg/import", tags=["import"])
@@ -54,9 +56,6 @@ def _require_tables(conn) -> None:
             status_code=503, detail={"code": "table_missing", "message": _TABLE_MISSING}
         )
 
-
-def _db():
-    return psycopg.connect(config.PG_DSN)
 
 
 def _enabled() -> None:
@@ -136,7 +135,7 @@ def _quota_used(ip: str, sources: tuple[str, ...] | None = None) -> int:
     if sources:
         sql += " AND source_key = ANY(%s)"
         args.append(list(sources))
-    with _db() as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         cur = conn.cursor()
         cur.execute(sql, args)
@@ -152,7 +151,7 @@ def _existing_in_graph(norms: list[str]) -> set[str]:
     if not norms:
         return set()
     try:
-        with _db() as conn:
+        with db.connect() as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT alias_norm FROM dict_alias "
@@ -168,7 +167,7 @@ def _open_import_bundles(norms: list[str]) -> dict[str, str]:
     """这个来源下已经在队列里（未结）的同名 bundle → 状态。"""
     if not norms:
         return {}
-    with _db() as conn:
+    with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT food_key, status FROM kg_food_bundle "
@@ -242,7 +241,7 @@ async def preview(request: Request, file: UploadFile = File(...)):
     summary = importer.summarize(results)
     job_id = uuid.uuid4()
 
-    with _db() as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         cur = conn.cursor()
         cur.execute(
@@ -313,7 +312,7 @@ def commit(job_id: str):
     except (ValueError, AttributeError) as exc:
         raise _bad("批次号格式不对", code="bad_job_id", status=404) from exc
 
-    with _db() as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         cur = conn.cursor()
         cur.execute(
@@ -354,7 +353,7 @@ def commit(job_id: str):
     ]
     staged = import_bundle.stage_bundles(results, jid, filename or "")
 
-    with _db() as conn:
+    with db.connect() as conn:
         conn.execute(
             "UPDATE kg_import_job SET status = 'committed', committed_at = now() "
             "WHERE job_id = %s",
@@ -424,7 +423,7 @@ def create_manual(request: Request, body: dict[str, Any] = Body(...)):
         )
 
     job_id = uuid.uuid4()
-    with _db() as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         conn.execute(
             "INSERT INTO kg_import_job (job_id, filename, client_ip, template_version, "
@@ -488,7 +487,7 @@ def list_foods(
     offset: int = Query(0, ge=0),
 ):
     """导入来源的 bundle。q 同时匹配名称、归一名与别名。"""
-    with _db() as conn:
+    with db.connect() as conn:
         _require_tables(conn)
     return import_bundle.list_import_bundles(
         q=q, category=category, status=status, limit=limit, offset=offset
@@ -497,7 +496,7 @@ def list_foods(
 
 @router.get("/jobs")
 def list_jobs(limit: int = Query(10, ge=1, le=50)):
-    with _db() as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         cur = conn.cursor()
         cur.execute(
@@ -521,7 +520,7 @@ def list_jobs(limit: int = Query(10, ge=1, le=50)):
 @router.get("/stats")
 def stats() -> dict[str, Any]:
     """审核队列的当前分布，页面顶部提示用。"""
-    with _db() as conn:
+    with db.connect() as conn:
         _require_tables(conn)
         cur = conn.cursor()
         cur.execute(

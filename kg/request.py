@@ -29,6 +29,8 @@ import psycopg
 import config
 from kg.normalize import AliasStore, normalize_text
 
+import db
+
 log = logging.getLogger("kg.request")
 
 # ============================================================
@@ -260,7 +262,7 @@ def register(
                 )
 
         # ---- 限流 ----
-        with psycopg.connect(config.PG_DSN) as conn:
+        with db.connect() as conn:
             exists = conn.execute(
                 "SELECT id, status, hit_count FROM kg_ingredient_request WHERE food_key = %s",
                 (term,),
@@ -380,7 +382,7 @@ def _non_ingredient_rank(entity_type: str) -> tuple[int, str]:
 # ============================================================
 def get_request(request_id: int, who: str) -> dict[str, Any] | None:
     """按 id 查登记状态。只返回属于当前身份的条目（管理员另走 /admin）。"""
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         row = conn.execute(
             "SELECT id, food_key, raw_mention, status, hit_count, created_at, last_requested_at "
             "FROM kg_ingredient_request WHERE id = %s AND requested_by = %s",

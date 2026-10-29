@@ -25,6 +25,8 @@ import psycopg
 import config
 from security.tokens import ANON_PREFIX
 
+import db
+
 log = logging.getLogger("memory.anonymous_merge")
 
 
@@ -52,7 +54,7 @@ def merge_anon_into_user(anon_id: str, user_id: str) -> dict[str, Any]:
         result["skipped"] = True
         return result
 
-    with psycopg.connect(config.PG_DSN) as conn:
+    with db.connect() as conn:
         for key, sql in (
             ("sessions", "UPDATE session SET user_id = %s WHERE user_id = %s"),
             ("memory_facts", "UPDATE memory_fact SET user_id = %s WHERE user_id = %s"),
