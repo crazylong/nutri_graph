@@ -39,6 +39,10 @@ class RejectRequest(BaseModel):
     reason: str = Field("", max_length=500)
 
 
+class ApproveCandidateRequest(BaseModel):
+    confirm_sensitive: bool = Field(False, description="已人工确认 review 级敏感词")
+
+
 class ApproveBundleRequest(BaseModel):
     item_ids: list[int] | None = Field(None, description="只采用这些项；空表示全部")
     merge: bool = Field(True, description="通过后立即合并进主图")
@@ -136,6 +140,15 @@ def list_candidates(
         )
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    from kg.sensitive import scan
+
+    for row in rows:
+        hits = []
+        hits += scan(str(row.get("dst_name") or ""), field_name="name")
+        hits += scan(str(row.get("claim_text") or ""), field_name="claim_text")
+        row["sensitive_block"] = sum(1 for h in hits if h.action == "block")
+        row["sensitive_review"] = sum(1 for h in hits if h.action == "review")
+        row["sensitive_words"] = sorted({h.word for h in hits if h.action == "review"})
     return {"status": status, "count": len(rows), "items": rows}
 
 
@@ -195,8 +208,14 @@ def _set_status(
 
 
 @router.post("/kg/candidates/{candidate_id}/approve")
-def approve_candidate(candidate_id: int, admin: dict = Depends(require_admin)):
-    return _set_status(candidate_id, "approved", admin["user_id"])
+def approve_candidate(
+    candidate_id: int,
+    req: ApproveCandidateRequest = ApproveCandidateRequest(),
+    admin: dict = Depends(require_admin),
+):
+    return _set_status(
+        candidate_id, "approved", admin["user_id"], confirm_sensitive=req.confirm_sensitive
+    )
 
 
 @router.post("/kg/candidates/{candidate_id}/reject")

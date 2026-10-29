@@ -127,6 +127,68 @@ def test_waterline_not_advanced_when_summary_fails():
     assert row[1] == ""
 
 
+def test_compress_backoff_skips_the_next_model_call():
+    from memory.short_term import ShortTermMemory
+
+    stm = ShortTermMemory()
+    sid = _new_session()
+    _rounds(sid, 5)
+    calls = {"n": 0}
+
+    def boom(prev, inc):
+        calls["n"] += 1
+        raise RuntimeError("模型挂了")
+
+    assert stm.compress_if_needed(sid, summarize_fn=boom) is False
+    assert stm.compress_if_needed(sid, summarize_fn=boom) is False
+    assert calls["n"] == 1, "失败后的下一次不该再打模型"
+
+
+def test_compress_gives_up_when_waterline_moved():
+    from memory.short_term import ShortTermMemory
+
+    stm = ShortTermMemory()
+    sid = _new_session()
+    _rounds(sid, 4)
+
+    def sneak(prev, inc):
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE session SET summary = '别人写的', summary_until_msg_id = 1 "
+                "WHERE id = %s",
+                (sid,),
+            )
+        return "这次不该写上"
+
+    assert stm.compress_if_needed(sid, summarize_fn=sneak) is False
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT summary, COALESCE(summary_until_msg_id, 0) FROM session WHERE id = %s",
+            (sid,),
+        ).fetchone()
+    assert row[0] == "别人写的"
+    assert int(row[1]) == 1
+
+
+def test_pending_older_text_is_capped_without_writing_summary(monkeypatch):
+    import config
+    from memory.short_term import ShortTermMemory
+
+    monkeypatch.setattr(config, "MEMORY_PENDING_MAX_CHARS", 20)
+    stm = ShortTermMemory()
+    sid = _new_session()
+    _rounds(sid, 5)
+    ctx = stm.load_context(sid)
+    assert "更早对话尚未摘要" in ctx
+    assert "第5轮的问题" in ctx
+    with db.connect() as conn:
+        summary = conn.execute(
+            "SELECT COALESCE(summary, '') FROM session WHERE id = %s", (sid,)
+        ).fetchone()[0]
+    assert summary == ""
+    assert "更早对话尚未摘要" not in summary
+
+
 # ---------------------------------------------------------------
 # 摘要合并写回
 # ---------------------------------------------------------------

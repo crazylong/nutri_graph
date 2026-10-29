@@ -98,7 +98,8 @@ def get_bundle(bundle_id: int) -> dict[str, Any]:
             "       category, nature, aliases, source_key, external_id, source_desc, "
             "       evidence_type, score_total, score_detail, source_count, sources, "
             "       hard_veto, status, canonical_id, reviewer, reviewed_at, reject_reason, "
-            "       COALESCE(sensitive_hits, '[]'::jsonb) AS sensitive_hits "
+            "       COALESCE(sensitive_hits, '[]'::jsonb) AS sensitive_hits, "
+            "       COALESCE(sensitive_word_version, 0) AS sensitive_word_version "
             "FROM kg_food_bundle WHERE id = %s",
             (bundle_id,),
         )
@@ -107,13 +108,6 @@ def get_bundle(bundle_id: int) -> dict[str, Any]:
             raise PromoteError(f"bundle {bundle_id} 不存在")
         cols = [d[0] for d in cur.description]
         bundle = dict(zip(cols, row))
-        # 审核页看不到命中就等于没提示：这里顺手按当前词表再扫一次，
-        # 避免"落库后词表更新了"导致页面上显示的是旧结果。
-        from kg.sensitive import BUNDLE_FIELDS, scan_obj
-
-        bundle["sensitive_hits_live"] = [
-            h.as_dict() for h in scan_obj(bundle, BUNDLE_FIELDS)
-        ]
 
         cur.execute(
             "SELECT id, item_type, field_name, field_value, unit, source_locator, "
@@ -132,6 +126,29 @@ def get_bundle(bundle_id: int) -> dict[str, Any]:
         bundle["node_candidates"] = [
             {"node_type": r[0], "canonical_id": r[1], "name": r[2]} for r in cur.fetchall()
         ]
+
+        # 备注只在 item 上，行上没有 note 列。来源文本在行的 source_desc
+        # （导入时 payload.source 写在这里）。item 里同名的 source_desc 经常是空的，
+        # 盖上去会把行上的「加微信」扫没。
+        from kg.sensitive import BUNDLE_FIELDS, current_version, scan_obj
+
+        scan_input = dict(bundle)
+        notes = [
+            it["field_value"]
+            for it in bundle["items"]
+            if it.get("item_type") == "field"
+            and it.get("field_name") == "note"
+            and it.get("field_value")
+        ]
+        if notes:
+            scan_input["note"] = "\n".join(notes)
+        live = [h.as_dict() for h in scan_obj(scan_input, BUNDLE_FIELDS)]
+        stored = bundle.get("sensitive_hits") or []
+        bundle["sensitive_hits_live"] = live
+        bundle["hits_live"] = live
+        bundle["hits_stored"] = stored
+        bundle["word_version_live"] = current_version()
+        bundle["word_version_stored"] = int(bundle.get("sensitive_word_version") or 0)
     return bundle
 
 

@@ -93,9 +93,13 @@ const FIELD_LABEL = {
   claim_text: '断言原文',
 }
 
-// 实时重扫的优先：落库后词表可能更新过，看旧结果会漏
+// 实时重扫有命中才用它。空数组在 JS 里是真值，用 || 会把库里记下的旧命中盖掉。
 const hits = computed(() => {
-  const raw = (bundle.value && (bundle.value.sensitive_hits_live || bundle.value.sensitive_hits)) || []
+  const b = bundle.value
+  if (!b) return []
+  const live = b.hits_live || b.sensitive_hits_live
+  const stored = b.hits_stored || b.sensitive_hits
+  const raw = (live && live.length) ? live : (stored || [])
   return raw.map((h) => ({ ...h, fieldLabel: FIELD_LABEL[h.field] || h.field || '' }))
 })
 const hasBlock = computed(() => hits.value.some((h) => h.action === 'block'))

@@ -15,9 +15,16 @@
       <el-table-column label="来源">
         <template #default="{ row }">{{ formatSources(row.sources) }}</template>
       </el-table-column>
+      <el-table-column label="敏感词" width="140">
+        <template #default="{ row }">
+          <el-tag v-if="row.sensitive_block" type="danger" size="small">阻断 {{ row.sensitive_block }}</el-tag>
+          <el-tag v-else-if="row.sensitive_review" type="warning" size="small">待确认 {{ row.sensitive_review }}</el-tag>
+          <span v-else>—</span>
+        </template>
+      </el-table-column>
       <el-table-column label="操作" width="160">
         <template #default="{ row }">
-          <el-button link @click="act(row, 'approve')">通过</el-button>
+          <el-button link :disabled="row.sensitive_block > 0" @click="act(row, 'approve')">通过</el-button>
           <el-button link type="danger" @click="act(row, 'reject')">驳回</el-button>
         </template>
       </el-table-column>
@@ -54,6 +61,23 @@ async function reload() {
 
 async function act(row, kind) {
   let reason = ''
+  let payload = {}
+  if (kind === 'approve') {
+    if (row.sensitive_block > 0) return
+    if (row.sensitive_review > 0) {
+      const words = (row.sensitive_words || []).join('、')
+      try {
+        await ElMessageBox.confirm(
+          words ? `待确认：${words}` : '含待确认的敏感词',
+          '确认通过',
+          { confirmButtonText: '已看过，通过', cancelButtonText: '取消', type: 'warning' },
+        )
+      } catch {
+        return
+      }
+      payload = { confirm_sensitive: true }
+    }
+  }
   if (kind === 'reject') {
     try {
       const answer = await ElMessageBox.prompt('驳回理由，可空', '驳回候选', {
@@ -69,7 +93,7 @@ async function act(row, kind) {
   const response = await api('/admin/kg/candidates/' + row.id + '/' + kind, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: kind === 'reject' ? JSON.stringify({ reason }) : '{}',
+    body: kind === 'reject' ? JSON.stringify({ reason }) : JSON.stringify(payload),
   })
   const body = await readJson(response)
   if (!response.ok) {

@@ -135,6 +135,7 @@ def test_sensitive_guard_hits_political_only():
 
     out = nodes.sensitive_guard_node({"question": f"{POLITICAL}能吃什么"})
     assert out.get("_redact") is True
+    assert out.get("_redacted_kind") == "political"
     assert POLITICAL not in out["answer"], "固定话术里不能带原词"
     assert "换个具体的食材" in out["answer"]
 
@@ -171,6 +172,46 @@ def test_output_scan_falls_back_when_everything_is_dropped():
     cleaned, hits = sensitive.rewrite_answer("这个可以治疗贫血。")
     assert hits
     assert cleaned == sensitive.MEDICAL_FALLBACK
+
+
+def test_output_scan_keeps_superlative_and_drops_unnegated_claim():
+    """「最好」只审计，不删句。同句里未否定的「治疗」仍整句删。"""
+    import kg.sensitive as sensitive
+
+    kept, hits = sensitive.rewrite_answer("黑豆和薏米一起吃最好。")
+    assert kept == "黑豆和薏米一起吃最好。"
+    assert any(h.word == "最好" for h in hits)
+
+    dropped, hits = sensitive.rewrite_answer("菠菜能治疗贫血，但最好少吃。")
+    assert dropped == sensitive.MEDICAL_FALLBACK
+    assert any(h.word == "最好" for h in hits)
+    assert any(h.word == "治疗" for h in hits)
+
+
+def test_claim_negation_is_per_hit_with_end_to_start_gap():
+    """否定看的是词尾到命中词头的间隔，不是往前截 6 个字。"""
+    import kg.sensitive as sensitive
+
+    keep_cannot, _ = sensitive.rewrite_answer("菠菜不能治疗贫血。")
+    assert keep_cannot == "菠菜不能治疗贫血。"
+
+    drop_can, _ = sensitive.rewrite_answer("菠菜能治疗贫血。")
+    assert drop_can == sensitive.MEDICAL_FALLBACK
+
+    # 「没有证据」离「治疗」有 5 个字，前 6 字截断会漏掉否定
+    keep_evidence, hits = sensitive.rewrite_answer("没有证据表明菠菜能治疗贫血，但含铁较丰富。")
+    assert "含铁" in keep_evidence
+    assert "治疗" in keep_evidence
+    assert any(h.word == "治疗" for h in hits)
+
+    # 治愈没被否定：整句删，不能因为前面的「不能治疗」把后半句留下
+    drop_cure, _ = sensitive.rewrite_answer("菠菜不能治疗贫血，但可以治愈夜盲。")
+    assert "夜盲" not in drop_cure
+    assert drop_cure == sensitive.MEDICAL_FALLBACK
+
+    # 同一个词出现两次：有一处没被否定，整句删
+    twice, _ = sensitive.rewrite_answer("菠菜治疗贫血，不能治疗夜盲。")
+    assert twice == sensitive.MEDICAL_FALLBACK
 
 
 # ---------------------------------------------------------------
@@ -273,3 +314,206 @@ def test_marketing_word_in_note_is_warn_not_error():
     r = importer.validate_row(2, _row(note="详情加微信咨询"), list(importer.COLUMNS))
     assert r.verdict == "warn", r.messages
     assert r.importable
+
+
+@requires_pg
+def test_name_only_blocks_name_and_keeps_description_and_answer():
+    """功效只在名称拦截。描述放行，回答里也不按疗效整句删。"""
+    import kg.sensitive as sensitive
+    from kg import importer
+
+    name_hits = sensitive.scan("菠菜功效", field_name="name")
+    assert any(h.word == "功效" and h.action == "block" for h in name_hits)
+    note_hits = sensitive.scan("清热解暑，有健脾功效", field_name="note")
+    assert not any(h.word == "功效" for h in note_hits)
+
+    blocked = importer.validate_row(2, _row(name="菠菜功效"), list(importer.COLUMNS))
+    assert blocked.verdict == "error"
+    passed = importer.validate_row(
+        3, _row(note="清热解暑，有健脾功效"), list(importer.COLUMNS)
+    )
+    assert passed.verdict == "ok", passed.messages
+    assert not any("功效" in m.text for m in passed.messages)
+
+    text = "这道菜有健脾功效。"
+    cleaned, hits = sensitive.rewrite_answer(text)
+    assert cleaned == text
+    assert not any(h.word == "功效" for h in hits)
+
+    political = sensitive.scan("毛爷爷", field_name="note")
+    assert any(h.word == "毛爷爷" and h.action == "block" for h in political)
+    marketing = sensitive.scan("联系销售后下单", field_name="note")
+    words = {h.word for h in marketing}
+    assert "销售" in words and "下单" in words
+    assert not any(h.word == "电话" for h in sensitive.scan("联系电话", field_name="note"))
+
+
+def test_redact_trace_keeps_guard_output():
+    from observability.tracing import redact_trace
+
+    class _Trace:
+        def __init__(self):
+            self.payloads = []
+
+        def update(self, **kwargs):
+            self.payloads.append(kwargs)
+
+    kept = _Trace()
+    redact_trace(kept, "[内容已过滤]", keep_output=True)
+    assert kept.payloads[0]["input"]["question"] == "[内容已过滤]"
+    assert "output" not in kept.payloads[0]
+
+    wiped = _Trace()
+    redact_trace(wiped, "[内容已过滤]")
+    assert wiped.payloads[0]["output"]["answer"] == "[内容已过滤]"
+
+
+@requires_pg
+def test_memory_write_red_flag_sets_guard_kind_and_keeps_answer():
+    """红旗路径不经过 sensitive_guard。用户侧打码，就医回答原样留下。"""
+    import graph.nodes as nodes
+    import kg.sensitive as sensitive
+
+    question = f"我胸痛，听说{POLITICAL}能吃"
+    state = {"question": question, "user_id": "u-redact-guard"}
+    state.update(nodes.guard_node(state))
+    out = nodes.memory_write_node(state)
+    assert out.get("_redact") is True
+    assert out.get("_redacted_kind") == "guard"
+    sid = out["session_id"]
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT role, content FROM message WHERE session_id = %s ORDER BY id",
+            (sid,),
+        ).fetchall()
+        title = conn.execute("SELECT title FROM session WHERE id = %s", (sid,)).fetchone()
+    user_msgs = [c for role, c in rows if role == "user"]
+    assistant_msgs = [c for role, c in rows if role == "assistant"]
+    assert user_msgs == [sensitive.REDACT]
+    assert assistant_msgs and "就医" in assistant_msgs[0]
+    assert POLITICAL not in assistant_msgs[0]
+    assert POLITICAL not in (title[0] or "")
+
+
+@requires_pg
+def test_get_bundle_live_scan_uses_note_item_and_row_source_desc():
+    """备注在 item 上。行上的 source_desc 不能被空的 item 盖掉。"""
+    import secrets
+
+    from kg.promote import get_bundle
+
+    food_key = "t31-" + secrets.token_hex(4)
+    with db.connect() as conn:
+        bid = conn.execute(
+            "INSERT INTO kg_food_bundle (food_key, canonical_name, source_desc, status) "
+            "VALUES (%s, '测试豆', '详情加微信', 'pending_review') RETURNING id",
+            (food_key,),
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO kg_food_bundle_item "
+            "(bundle_id, item_type, field_name, field_value) VALUES "
+            "(%s, 'field', 'note', '有助于治疗'), (%s, 'field', 'source_desc', '')",
+            (bid, bid),
+        )
+    try:
+        bundle = get_bundle(bid)
+        live = {(h["field"], h["word"]) for h in bundle["hits_live"]}
+        assert ("note", "治疗") in live
+        assert ("source_desc", "加微信") in live
+        assert bundle["source_desc"] == "详情加微信"
+        assert bundle["hits_stored"] == []
+    finally:
+        with db.connect() as conn:
+            conn.execute("DELETE FROM kg_food_bundle WHERE id = %s", (bid,))
+
+
+@requires_pg
+def test_candidate_review_needs_confirm_block_does_not(client):
+    """review 不确认是 409，确认后 200。block 确认了也是 409。"""
+    import secrets
+
+    from tests.test_admin import _admin
+
+    _, headers = _admin(client)
+    review_id = block_id = None
+    with db.connect() as conn:
+        review_id = conn.execute(
+            "INSERT INTO kg_candidate "
+            "(batch_id, src_type, src_id, rel, dst_type, dst_id, dst_name, claim_text) "
+            "VALUES ('t31', 'Ingredient', %s, 'SUITABLE_FOR', 'Symptom', 'DST_T31', "
+            "'贫血', '菠菜能治疗贫血') RETURNING id",
+            ("SRC_" + secrets.token_hex(4),),
+        ).fetchone()[0]
+        block_id = conn.execute(
+            "INSERT INTO kg_candidate "
+            "(batch_id, src_type, src_id, rel, dst_type, dst_id, dst_name, claim_text) "
+            "VALUES ('t31', 'Ingredient', %s, 'SUITABLE_FOR', 'Symptom', 'DST_T31B', "
+            "%s, '') RETURNING id",
+            ("SRC_" + secrets.token_hex(4), POLITICAL),
+        ).fetchone()[0]
+    try:
+        listed = client.get(
+            "/admin/kg/candidates",
+            params={"status": "pending", "limit": 500},
+            headers=headers,
+        )
+        assert listed.status_code == 200, listed.text
+        items = listed.json()["items"]
+        assert items and "sensitive_block" in items[0]
+        review_row = next((i for i in items if i["id"] == review_id), None)
+        if review_row is not None:
+            assert review_row["sensitive_block"] == 0
+            assert review_row["sensitive_review"] >= 1
+            assert "治疗" in review_row["sensitive_words"]
+        block_row = next((i for i in items if i["id"] == block_id), None)
+        if block_row is not None:
+            assert block_row["sensitive_block"] >= 1
+
+        denied = client.post(
+            f"/admin/kg/candidates/{review_id}/approve",
+            headers=headers,
+            json={},
+        )
+        assert denied.status_code == 409, denied.text
+        ok = client.post(
+            f"/admin/kg/candidates/{review_id}/approve",
+            headers=headers,
+            json={"confirm_sensitive": True},
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["status"] == "approved"
+
+        still = client.post(
+            f"/admin/kg/candidates/{block_id}/approve",
+            headers=headers,
+            json={"confirm_sensitive": True},
+        )
+        assert still.status_code == 409, still.text
+    finally:
+        with db.connect() as conn:
+            conn.execute(
+                "DELETE FROM kg_candidate WHERE id = ANY(%s)",
+                ([i for i in (review_id, block_id) if i is not None],),
+            )
+
+
+@requires_pg
+def test_merge_nodes_keeps_review_and_logs_hash(caplog):
+    import logging
+
+    from kg.merge import _nodes_passing_sensitive
+
+    caplog.set_level(logging.ERROR, logger="kg.merge")
+    kept = _nodes_passing_sensitive(
+        [
+            {"id": 1, "name": POLITICAL, "props": {"canonical_name": POLITICAL}},
+            {
+                "id": 2,
+                "name": "黄豆",
+                "props": {"canonical_name": "黄豆", "summary": "有助于治疗贫血"},
+            },
+        ]
+    )
+    assert [row["id"] for row in kept] == [2]
+    assert POLITICAL not in caplog.text
+    assert "hash=" in caplog.text

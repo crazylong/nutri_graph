@@ -77,10 +77,6 @@ def chat(payload: dict, who: dict | None = Depends(get_principal)):
         elapsed_ms = (time.time() - t0) * 1000
         # 原句在进图之前就写进了 trace 的 input，图内的打码管不到它。
         # 命中时三处（message / 画像 / trace）必须用同一个占位常量。
-        if tr is not None and result.get("_redact"):
-            from kg.sensitive import REDACT
-
-            redact_trace(tr, REDACT)
         if tr is not None:
             record_result(
                 tr,
@@ -89,6 +85,16 @@ def chat(payload: dict, who: dict | None = Depends(get_principal)):
                 graph_hit=result.get("_graph_hit", False),
                 degraded=result.get("_degraded", False),
                 elapsed_ms=elapsed_ms,
+            )
+        # 先记回答再打码。倒过来的话 record_result 会把刚写的占位盖回原文。
+        # kind=guard 时 output 留下就医回答；缺省则 input 和 output 都是占位。
+        if tr is not None and result.get("_redact"):
+            from kg.sensitive import REDACT
+
+            redact_trace(
+                tr,
+                REDACT,
+                keep_output=result.get("_redacted_kind") == "guard",
             )
 
     return {

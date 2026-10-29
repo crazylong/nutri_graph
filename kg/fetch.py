@@ -206,7 +206,14 @@ def _persist(
     # 抓取落库前扫一遍：USDA 的 description 是外部文本，可能带营销词。
     # 命中 block 就整条不落库 —— 让任务失败并留下原因，比落一条待审数据
     # 再等审核员发现要干净。
-    from kg.sensitive import BUNDLE_FIELDS, SensitiveBlocked, log_hits, scan_obj
+    from kg.sensitive import (
+        BUNDLE_FIELDS,
+        SensitiveBlocked,
+        current_version,
+        hits_json,
+        log_hits,
+        scan_obj,
+    )
 
     s_hits = scan_obj(
         {
@@ -230,8 +237,9 @@ def _persist(
             INSERT INTO kg_food_bundle
                 (request_id, food_key, canonical_name, english_name, scientific_name,
                  category, nature, source_key, external_id, source_desc,
-                 score_total, score_detail, source_count, sources, hard_veto, status)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                 score_total, score_detail, source_count, sources, hard_veto,
+                 sensitive_hits, sensitive_word_version, status)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             RETURNING id
             """,
             (
@@ -250,6 +258,8 @@ def _persist(
                 1,
                 psycopg.types.json.Jsonb(sources),
                 result.hard_veto,
+                psycopg.types.json.Jsonb(hits_json(s_hits)),
+                current_version(),
                 result.status,
             ),
         ).fetchone()

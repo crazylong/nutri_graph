@@ -46,6 +46,7 @@ IMPORT_FIELDS = (
 BUNDLE_FIELDS = (
     ("canonical_name", "名称"),
     ("aliases", "别名"),
+    ("english_name", "英文名"),
     ("scientific_name", "学名"),
     ("source_desc", "原始描述"),
     ("note", "备注"),
@@ -185,10 +186,21 @@ def current_version() -> int:
     return _word_version
 
 
-def _effective_action(category: str, default: str, field_name: str) -> str:
+def _is_name_field(field_name: str) -> bool:
+    return field_name in NAME_FIELDS or field_name == "canonical_name"
+
+
+def _effective_action(category: str, default: str, field_name: str) -> str | None:
+    """返回折算后的动作。None 表示这个字段上忽略该词，调用方不产生命中。
+
+    name_only：名称升成 block，描述和回答里不返回。不能把 action 原样交回去，
+    validate_row 会把非 block 一律收成 warn，「功效」就会误伤备注。
+    """
     if category == "political":
         return "block"
-    if field_name in NAME_FIELDS or field_name in ("canonical_name",):
+    if default == "name_only":
+        return "block" if _is_name_field(field_name) else None
+    if _is_name_field(field_name):
         return "block"
     return default
 
@@ -203,17 +215,21 @@ def scan(text: str, field_name: str = "") -> list[Hit]:
         return []
     out: list[Hit] = []
     for nw, word, cat, act, sev in _load():
-        if nw and nw in n:
-            out.append(
-                Hit(
-                    field=field_name,
-                    word=word,
-                    category=cat,
-                    action=_effective_action(cat, act, field_name),
-                    severity=sev,
-                    raw_action=act,
-                )
+        if not nw or nw not in n:
+            continue
+        action = _effective_action(cat, act, field_name)
+        if not action:
+            continue
+        out.append(
+            Hit(
+                field=field_name,
+                word=word,
+                category=cat,
+                action=action,
+                severity=sev,
+                raw_action=act,
             )
+        )
     return out
 
 
@@ -299,18 +315,62 @@ def assert_bundle_approvable(
 
 
 # ------------------------------------------------------------
-# 输出扫描（步骤 2.9 / 计划 §3.7）
+# 输出扫描（步骤 2.9 / 计划 §3.7，v3.1 补了否定）
 # ------------------------------------------------------------
+# 较长的放前面没有功能差别：每个词单独 rfind。列在这里是为了读的人先看到整词。
+_NEGATIONS = ("没有证据", "不建议", "不构成", "不能", "无法", "并非")
+
+
+def _occurrence_negated(text: str, idx: int) -> bool:
+    """否定词的结尾到命中词开头不超过 6 个字。
+
+    不是「往前截 6 个字再查找」。那一截盖不住
+    「没有证据表明菠菜能治疗」（前 6 字是「据表明菠菜能」）。
+    """
+    prefix = text[:idx]
+    for neg in _NEGATIONS:
+        nidx = prefix.rfind(neg)
+        if nidx < 0:
+            continue
+        gap = idx - (nidx + len(neg))
+        if 0 <= gap <= 6:
+            return True
+    return False
+
+
+def claim_negated(sentence: str, hit: Hit) -> bool:
+    """这个疗效词在句中的每一处出现都被否定，才算否定。
+
+    有一处没被否定，整句仍要删（「不能治疗，但可以治愈」里的「治愈」）。
+    """
+    word = hit.word or ""
+    if not sentence or not word:
+        return False
+    text = sentence if word in sentence else normalize(sentence)
+    needle = word if word in sentence else normalize(word)
+    if not needle or needle not in text:
+        return False
+    positions: list[int] = []
+    start = 0
+    while True:
+        idx = text.find(needle, start)
+        if idx < 0:
+            break
+        positions.append(idx)
+        start = idx + len(needle)
+    return bool(positions) and all(_occurrence_negated(text, idx) for idx in positions)
+
+
 def rewrite_answer(text: str) -> tuple[str, list[Hit]]:
     """按类别分两种动作，不是一律整段替换。
 
-    - political：整段换成固定话术（出现在回答里就是事故，没有"保留部分内容"的选项）
-    - medical_claim：保留食材事实，**按句剔除**含疗效断言的句子
-      —— 整段替换会让"菠菜能治疗贫血吗"答不出菠菜，与完成条件冲突；
-        不管又会留下疗效断言，同样冲突
+    - political：整段换成固定话术
+    - medical_claim：按句剔除。句里只要有一处疗效词没被否定，整句删掉；
+      全部被否定则保留，命中仍留在返回的 hits 里供审计
+    - marketing / superlative：只进 hits，不删句子（「最好」是口味，不是疗效）
 
-    只扫模型生成的正文：固定免责声明含「诊断」（config._DEFAULT_DISCLAIMER），
-    拼进来扫会让每条正常回答都命中。
+    同句既有未否定的「治疗」又有「最好」，整句仍删。
+    只扫模型生成的正文：固定免责声明含「诊断」，拼进来扫会让每条正常回答都命中。
     """
     if not text:
         return text, []
@@ -323,7 +383,8 @@ def rewrite_answer(text: str) -> tuple[str, list[Hit]]:
 
     kept = []
     for sent in re.split(r"(?<=[。！？；!?;\n])", text):
-        if scan(sent, field_name="answer"):
+        claims = [h for h in scan(sent, field_name="answer") if h.category == "medical_claim"]
+        if any(not claim_negated(sent, h) for h in claims):
             continue
         kept.append(sent)
     out = "".join(kept).strip()

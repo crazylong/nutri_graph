@@ -57,6 +57,7 @@ def sensitive_guard_node(state: dict) -> dict:
         "_graph_hit": False,
         "_degraded": False,
         "_redact": True,
+        "_redacted_kind": "political",
         "_food_requests": [],
     }
 
@@ -628,6 +629,7 @@ def memory_write_node(state: dict) -> dict:
         # 打码只动用户侧：助手侧保留原文（政治类固定话术本来就不含原词；
         # 红旗就医回答复述的是症状词，§1.6 第 2 点要求保留 —— 换成占位是安全风险）
         redact = bool(state.get("_redact"))
+        kind = str(state.get("_redacted_kind") or "")
         from kg.sensitive import REDACT
 
         if not redact:
@@ -642,6 +644,7 @@ def memory_write_node(state: dict) -> dict:
                 if hits:
                     log_hits("input", hits, source="memory_write")
                     redact = True
+                    kind = "guard"
             except Exception as exc:  # noqa: BLE001
                 log.warning("落库前政治类扫描失败（不打码）：%s", exc)
 
@@ -666,7 +669,13 @@ def memory_write_node(state: dict) -> dict:
         # 滚动摘要：落库之后起后台线程（步骤 4.6）。
         # 绝不能放在 generate 之前同步调 —— 每轮多一次 LLM 往返。
         _defer_compress(session_id)
-        return {"session_id": session_id}
+        result = {"session_id": session_id}
+        if redact:
+            # kind 必须带回去：chat 靠它决定 trace 的 output 留不留就医回答。
+            # 缺省会把 output 也写成占位。
+            result["_redact"] = True
+            result["_redacted_kind"] = kind or "political"
+        return result
     except Exception as e:  # noqa: BLE001 —— 记忆失败不阻断主流程
-        log.warning("memory_write 失败：%s", e)
+        log.warning("memory_write 失败 metric=memory_write_failed：%s", e)
         return {}

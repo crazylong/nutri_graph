@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from typing import Any
 
@@ -46,24 +47,60 @@ _SUMMARY_PROMPT = """\
 """
 
 
+# 模型失败后跳过接下来若干次调用，避免每轮都再打一次挂掉的模型。
+# (剩余跳过次数, 下一档间隔)。成功则清掉。间隔 1、2、4、8，到 8 封顶。
+_backoff_guard = threading.Lock()
+_backoff: dict[str, tuple[int, int]] = {}
+
+_PENDING_MARK = "更早对话尚未摘要"
+
+
+def _compress_should_skip(session_id: str) -> bool:
+    with _backoff_guard:
+        state = _backoff.get(session_id)
+        if not state or state[0] <= 0:
+            return False
+        _backoff[session_id] = (state[0] - 1, state[1])
+        return True
+
+
+def _compress_failed(session_id: str) -> None:
+    with _backoff_guard:
+        prev = _backoff.get(session_id)
+        delay = 1 if not prev else min(prev[1] * 2, 8)
+        _backoff[session_id] = (delay, delay)
+
+
+def _compress_ok(session_id: str) -> None:
+    with _backoff_guard:
+        _backoff.pop(session_id, None)
+
+
+def _cap_pending(text: str) -> str:
+    """只截进提示词的那一段。不改库里的消息，也不写进 session.summary。"""
+    limit = config.MEMORY_PENDING_MAX_CHARS
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return f"{_PENDING_MARK}\n{text[-limit:]}"
+
+
 def _summarize(prev: str, inc: str) -> str:
-    """合并式摘要。没配 LLM 时退化成拼接截断 —— 宁可粗糙也不能不写。"""
+    """合并式摘要。没配密钥时退化成拼接截断。模型异常必须抛出去，不能当成摘要成功。"""
     if not config.DASHSCOPE_API_KEY:
         body = "\n".join(inc.splitlines()[-20:])
         return ((prev + "\n" + body) if prev else body)[:4000]
-    try:
-        from llm import invoke_model
+    from llm import invoke_model
 
+    try:
         resp = invoke_model(
             f"{_SUMMARY_PROMPT}\n已有摘要：\n{prev or '（无）'}\n\n新增对话：\n{inc}",
             enable_thinking=False,
         )
-        text = getattr(resp, "content", resp) or ""
-        return str(text).strip()[:4000]
-    except Exception as exc:  # noqa: BLE001
-        log.warning("摘要模型调用失败，退回拼接：%s", exc)
-        body = "\n".join(inc.splitlines()[-20:])
-        return ((prev + "\n" + body) if prev else body)[:4000]
+    except Exception:
+        log.warning("摘要模型调用失败", exc_info=True)
+        raise
+    text = getattr(resp, "content", resp) or ""
+    return str(text).strip()[:4000]
 
 
 class ShortTermMemory:
@@ -147,7 +184,7 @@ class ShortTermMemory:
             parts.append(f"[较早对话摘要]\n{summary}")
         # 水位线还没盖住的更早轮次：仍然给原文
         if older_raw and waterline <= 0:
-            parts.append("[更早对话原文]\n" + "\n".join(older_raw))
+            parts.append("[更早对话原文]\n" + _cap_pending("\n".join(older_raw)))
         elif older_raw:
             # 部分覆盖：只把水位线之后的原文补上，避免和摘要重复
             with db.connect() as conn:
@@ -159,7 +196,7 @@ class ShortTermMemory:
                 )
                 pending = [f"{r[0]}: {r[1]}" for r in cur.fetchall()]
             if pending:
-                parts.append("[更早对话原文]\n" + "\n".join(pending))
+                parts.append("[更早对话原文]\n" + _cap_pending("\n".join(pending)))
         if recent:
             parts.append("[最近对话]\n" + "\n".join(recent))
         return "\n\n".join(parts)
@@ -338,6 +375,8 @@ class ShortTermMemory:
         """
         if not config.MEMORY_SUMMARY_ENABLED:
             return False
+        if _compress_should_skip(session_id):
+            return False
         retain = config.MEMORY_RETAIN_TURNS
 
         try:
@@ -387,16 +426,24 @@ class ShortTermMemory:
             merged = fn(str(prev_summary or ""), inc)
         except Exception as exc:  # noqa: BLE001
             log.warning("摘要失败，不推进水位线：%s", exc)
+            _compress_failed(session_id)
             return False
         if not merged:
             return False
 
+        # 写回时带上刚才读到的水位线。另一条压缩已经写过的话，这次放弃，
+        # 避免用旧增量盖掉新摘要。锁不跨模型调用，所以不能靠行锁。
         with db.connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE session SET summary = %s, summary_until_msg_id = %s, "
-                "     summary_updated_at = now() WHERE id = %s",
-                (merged, new_waterline, session_id),
+                "     summary_updated_at = now() "
+                "WHERE id = %s AND COALESCE(summary_until_msg_id, 0) = %s",
+                (merged, new_waterline, session_id, int(waterline)),
             )
+            if cur.rowcount != 1:
+                log.warning("摘要写回时水位线已变，放弃本次 session=%s", session_id)
+                return False
+        _compress_ok(session_id)
         return True
 
     def summarize_if_needed(self, session_id: str, summarize_fn=None) -> bool:

@@ -183,8 +183,9 @@ MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
 # 语义从"条"改成"轮"：一轮一旦有 tool 消息（未来）就是 3–5 条，
 # 按条取会在轮中间切开，正好违反"保持一轮对话的完整性"。
 MEMORY_RETAIN_TURNS = int(os.getenv("MEMORY_RETAIN_TURNS", "3"))
-# 兼容旧名：只作为"最多取多少条"的上限保护，不再当作窗口
-SHORT_TERM_WINDOW = int(os.getenv("SHORT_TERM_WINDOW", "10"))
+# 水位线还没盖住的更早原文，提示词里最多带这么多字。
+# 模型连续失败时这段会变长；超出的用一行「更早对话尚未摘要」，不写进 session.summary。
+MEMORY_PENDING_MAX_CHARS = int(os.getenv("MEMORY_PENDING_MAX_CHARS", "2000"))
 SESSION_SUMMARY_THRESHOLD = int(os.getenv("SESSION_SUMMARY_THRESHOLD", "30"))  # 超长触发滚动摘要
 # 摘要用便宜模型；失败不推进水位线，下次重试，不阻断回答
 MEMORY_SUMMARY_ENABLED = os.getenv("MEMORY_SUMMARY_ENABLED", "true").lower() == "true"

@@ -85,11 +85,60 @@ def _fetch_approved_nodes(
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def _node_text_hits(row: dict) -> list:
+    """名称、别名、性味、简介都要扫。props 里的名称键是 canonical_name，不是 name。"""
+    from kg.sensitive import scan
+
+    props = row.get("props") or {}
+    if not isinstance(props, dict):
+        props = {}
+    hits = []
+    if row.get("name"):
+        hits.extend(scan(str(row["name"]), field_name="name"))
+    for key in ("canonical_name", "nature", "summary", "scientific_name"):
+        val = props.get(key)
+        if val:
+            hits.extend(scan(str(val), field_name=key))
+    aliases = props.get("aliases") or []
+    if isinstance(aliases, (list, tuple)):
+        text = "、".join(str(a) for a in aliases if a)
+    else:
+        text = str(aliases or "")
+    if text:
+        hits.extend(scan(text, field_name="aliases"))
+    return hits
+
+
+def _nodes_passing_sensitive(rows: list[dict]) -> list[dict]:
+    """block 的节点不进主图，状态保持 approved，也不记进 merged。review 仍合并。"""
+    from kg.sensitive import log_hits, term_hash
+
+    kept = []
+    for row in rows:
+        hits = _node_text_hits(row)
+        if hits:
+            log_hits("review", hits, source="merge_nodes")
+        blocking = [h for h in hits if h.action == "block"]
+        if blocking:
+            h0 = blocking[0]
+            log.error(
+                "节点候选 %s 命中 %s 级敏感词（hash=%s），拒绝合并",
+                row.get("id"), h0.category, term_hash(h0.word),
+            )
+            continue
+        kept.append(row)
+    return kept
+
+
 def merge_nodes(
     batch_id: str | None = None, batch_ids: list[str] | None = None
 ) -> int:
     """把 approved 节点候选 MERGE 进主图（按 canonical_id 幂等），返回合并数量。"""
     rows = _fetch_approved_nodes(batch_id, batch_ids)
+    if not rows:
+        log.info("没有待合并的节点候选")
+        return 0
+    rows = _nodes_passing_sensitive(rows)
     if not rows:
         log.info("没有待合并的节点候选")
         return 0
@@ -193,7 +242,7 @@ def merge(
     # 最后一道敏感词闸（步骤 2.5）：防"批准之后词表更新了"或有人直连 PG 改了 status。
     # 这里读得到的是边的 claim_text —— source_desc / note 不在这份结果里，
     # 那两个字段在 bundle 批准时扫（见 kg.sensitive.assert_bundle_approvable）。
-    from kg.sensitive import log_hits, scan
+    from kg.sensitive import log_hits, scan, term_hash
 
     clean = []
     for r in valid:
@@ -202,10 +251,12 @@ def merge(
             clean.append(r)
             continue
         log_hits("review", hits, source="merge")
-        if any(h.action == "block" for h in hits):
+        blocking = [h for h in hits if h.action == "block"]
+        if blocking:
+            h0 = blocking[0]
             log.error(
-                "边候选 %s 命中敏感词，拒绝合并（claim_text 前 40 字：%s）",
-                r.get("id"), str(r.get("claim_text") or "")[:40],
+                "边候选 %s 命中 %s 级敏感词（hash=%s），拒绝合并",
+                r.get("id"), h0.category, term_hash(h0.word),
             )
         else:
             clean.append(r)

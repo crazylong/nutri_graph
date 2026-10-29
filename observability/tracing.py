@@ -61,12 +61,19 @@ def trace(question: str, user_id: str = "anonymous"):
         pass
 
 
-def redact_trace(trace, placeholder: str) -> None:
-    """命中敏感词后把这条 trace 的 input / output 换成占位常量。"""
+def redact_trace(trace, placeholder: str, keep_output: bool = False) -> None:
+    """命中后把这条 trace 的 input 换成占位。
+
+    keep_output 只给红旗就医回答：output 要留下就医原文。
+    kind 缺省时 input 和 output 都写占位。
+    """
     if trace is None:
         return
     try:
-        trace.update(input={"question": placeholder}, output={"answer": placeholder})
+        payload: dict[str, Any] = {"input": {"question": placeholder}}
+        if not keep_output:
+            payload["output"] = {"answer": placeholder}
+        trace.update(**payload)
     except Exception:  # noqa: BLE001 —— 埋点失败不能影响回答
         pass
 

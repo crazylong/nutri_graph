@@ -37,6 +37,10 @@ class RAGState(TypedDict, total=False):
     # ⚠️ 必须在这里声明：RAGState 是 TypedDict，没声明的键会被 LangGraph 丢掉，
     #    节点里能读到、下一个节点读不到（这就是打码不生效的原因）。
     _redact: bool
+    # political：trace 的 input 和 output 都换成占位。
+    # guard：红旗路径跳过了 sensitive_guard，只换 input，就医回答留在 output。
+    # 同样必须声明，否则最终状态里没有 kind，缺省会把就医回答也盖成占位。
+    _redacted_kind: str
 
     # 生成
     answer: str
