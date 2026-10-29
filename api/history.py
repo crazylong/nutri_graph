@@ -38,18 +38,29 @@ def list_sessions(who: dict | None = Depends(get_principal)):
 
 
 @router.get("/sessions/{session_id}/messages")
-def list_messages(session_id: str, who: dict | None = Depends(get_principal)):
-    """某次对话的全部消息，按时间正序。不是本人的会话当不存在。"""
+def list_messages(
+    session_id: str,
+    q: str = "",
+    who: dict | None = Depends(get_principal),
+):
+    """某次对话的全部消息，按轮次正序。不是本人的会话当不存在。
+
+    q 非空是会话内检索：只返回命中的**用户**消息。
+    归属校验在进入检索之前 —— 新参数不能绕过 owns()。
+    """
     from memory.short_term import ShortTermMemory
 
     user_id = _user_id(who)
     memory = ShortTermMemory()
-    rows = memory.list_messages(user_id, session_id)
+    rows = memory.list_messages(user_id, session_id, q=q)
     if rows is None:
         raise HTTPException(
             status_code=404,
             detail={"code": "session_not_found", "message": "会话不存在"},
         )
+    # 检索模式不补卡：命中片段只用来跳转定位，补图是多余的检索开销
+    if q.strip():
+        return {"session_id": session_id, "messages": rows, "q": q}
     return {"session_id": session_id, "messages": _fill_missing_cards(memory, user_id, session_id, rows)}
 
 

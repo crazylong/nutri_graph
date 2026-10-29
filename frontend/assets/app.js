@@ -801,8 +801,12 @@ function hideEmpty() {
 function addQuestion(text) {
   hideEmpty();
   const wrap = el('div', 'q');
+  // data-role / data-text 供会话内检索用：过滤只匹配自己问过的话
+  wrap.dataset.role = 'user';
+  wrap.dataset.text = text || '';
   wrap.appendChild(el('div', 'bubble', text));
   thread.appendChild(wrap);
+  refreshAskList();
   scrollDown();
 }
 
@@ -1077,11 +1081,128 @@ if (drawer) {
 const historyEl = document.getElementById('history');
 const sessionListEl = document.getElementById('session-list');
 const recentListEl = document.getElementById('recent-list');
+const askListEl = document.getElementById('ask-list');
+const threadToolsEl = document.getElementById('thread-tools');
+const filterInputEl = document.getElementById('thread-filter');
+const filterCountEl = document.getElementById('filter-count');
 
 function clearHistoryPanel() {
   if (sessionListEl) sessionListEl.replaceChildren();
   if (recentListEl) recentListEl.replaceChildren();
   if (historyEl) historyEl.classList.remove('open');
+}
+
+/* ============================================================
+   会话内检索（需求 5 的 A + D）
+   只操作**已经加载**的消息：会话内容是敏感个人信息，
+   不为了一个搜索框再把原文送一次网。
+   ============================================================ */
+let filterHits = [];   // 命中的用户消息元素
+let filterPos = -1;
+
+function userBubbles() {
+  return Array.from(thread.querySelectorAll('[data-role="user"]'));
+}
+
+function refreshAskList() {
+  if (!askListEl) return;
+  askListEl.replaceChildren();
+  const items = userBubbles();
+  if (threadToolsEl) threadToolsEl.hidden = items.length === 0;
+  if (!items.length) {
+    askListEl.appendChild(el('p', 'history-empty', '这一轮还没有提问'));
+    return;
+  }
+  items.forEach((node, i) => {
+    const btn = el('button', 'ask-item');
+    btn.type = 'button';
+    btn.appendChild(el('span', 'ask-no', String(i + 1)));
+    btn.appendChild(el('span', 'ask-text', clip(node.dataset.text || '', 20)));
+    btn.addEventListener('click', () => {
+      node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      flash(node);
+    });
+    askListEl.appendChild(btn);
+  });
+}
+
+function flash(node) {
+  node.classList.remove('flash');
+  // 强制回流，连续点同一条也能再闪一次
+  void node.offsetWidth;
+  node.classList.add('flash');
+  setTimeout(() => node.classList.remove('flash'), 1200);
+}
+
+function clearHighlights() {
+  thread.querySelectorAll('mark.hit').forEach((m) => {
+    const parent = m.parentNode;
+    parent.replaceChild(document.createTextNode(m.textContent), m);
+    parent.normalize();
+  });
+}
+
+function applyFilter() {
+  if (!filterInputEl) return;
+  const q = (filterInputEl.value || '').trim();
+  clearHighlights();
+  filterHits = [];
+  filterPos = -1;
+  if (!q) {
+    if (filterCountEl) filterCountEl.textContent = '';
+    return;
+  }
+  const needle = q.toLowerCase();
+  userBubbles().forEach((node) => {
+    const bubble = node.querySelector('.bubble');
+    if (!bubble) return;
+    const text = node.dataset.text || bubble.textContent || '';
+    if (!text.toLowerCase().includes(needle)) return;
+    // 高亮：重建 bubble 的内容，命中处包 <mark class="hit">
+    bubble.replaceChildren();
+    const frag = document.createDocumentFragment();
+    let from = 0;
+    const lower = text.toLowerCase();
+    let at = lower.indexOf(needle);
+    while (at >= 0) {
+      if (at > from) frag.appendChild(document.createTextNode(text.slice(from, at)));
+      frag.appendChild(el('mark', 'hit', text.slice(at, at + needle.length)));
+      from = at + needle.length;
+      at = lower.indexOf(needle, from);
+    }
+    if (from < text.length) frag.appendChild(document.createTextNode(text.slice(from)));
+    bubble.appendChild(frag);
+    filterHits.push(node);
+  });
+  if (filterCountEl) {
+    filterCountEl.textContent = filterHits.length ? `1/${filterHits.length}` : '没有命中';
+  }
+  if (filterHits.length) jumpFilter(0);
+}
+
+function jumpFilter(step) {
+  if (!filterHits.length) return;
+  filterPos = (filterPos + step + filterHits.length) % filterHits.length;
+  const node = filterHits[filterPos];
+  node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  flash(node);
+  if (filterCountEl) {
+    filterCountEl.textContent = `${filterPos + 1}/${filterHits.length}`;
+  }
+}
+
+if (filterInputEl) {
+  filterInputEl.addEventListener('input', applyFilter);
+  filterInputEl.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      jumpFilter(ev.shiftKey ? -1 : 1);
+    }
+  });
+  const prev = document.getElementById('filter-prev');
+  const next = document.getElementById('filter-next');
+  if (prev) prev.addEventListener('click', () => jumpFilter(-1));
+  if (next) next.addEventListener('click', () => jumpFilter(1));
 }
 
 function formatWhen(iso) {
@@ -1096,6 +1217,8 @@ function formatWhen(iso) {
 function showEmptyThread() {
   thread.replaceChildren();
   if (empty) thread.appendChild(empty);
+  // 会话清空后"本轮问过"和过滤框也要跟着收起
+  refreshAskList();
 }
 
 function addHistoryAnswer(message) {
@@ -1168,6 +1291,13 @@ async function openSession(id) {
     else addHistoryAnswer(m);
   });
   if (!(body.messages || []).length) showEmptyThread();
+  if (filterInputEl) {
+    filterInputEl.value = '';
+    filterHits = [];
+    filterPos = -1;
+    if (filterCountEl) filterCountEl.textContent = '';
+  }
+  refreshAskList();
   if (historyEl) historyEl.classList.remove('open');
   loadHistory();
   scrollDown();

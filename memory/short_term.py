@@ -6,6 +6,7 @@ memory/short_term.py —— 短期记忆（PostgreSQL）
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Any
 
@@ -15,6 +16,8 @@ from psycopg.types.json import Jsonb
 import config
 
 import db
+
+log = logging.getLogger("memory.short_term")
 
 # 侧栏标题只取首问的前若干字，不再为标题打模型。
 SESSION_TITLE_CHARS = 40
@@ -28,6 +31,39 @@ def _json_card(card: dict | None) -> dict:
         return json.loads(json.dumps(card or {}, ensure_ascii=False, default=str))
     except (TypeError, ValueError):
         return {}
+
+
+_SUMMARY_PROMPT = """\
+你是食疗问答的记忆整理助手。把「已有摘要」和「新增对话」合并成一份摘要。
+
+固定四段，不要自由发挥：
+1) 用户约束：过敏 / 忌口 / 症状 / 人群（孕妇、老人…）
+2) 已确认未收录的食材（避免重复登记）
+3) 已给出的建议要点（≤5 条，每条 ≤20 字）
+4) 用户问过的问题清单
+
+只输出合并后的摘要正文，不要小标题以外的解释。
+"""
+
+
+def _summarize(prev: str, inc: str) -> str:
+    """合并式摘要。没配 LLM 时退化成拼接截断 —— 宁可粗糙也不能不写。"""
+    if not config.DASHSCOPE_API_KEY:
+        body = "\n".join(inc.splitlines()[-20:])
+        return ((prev + "\n" + body) if prev else body)[:4000]
+    try:
+        from llm import invoke_model
+
+        resp = invoke_model(
+            f"{_SUMMARY_PROMPT}\n已有摘要：\n{prev or '（无）'}\n\n新增对话：\n{inc}",
+            enable_thinking=False,
+        )
+        text = getattr(resp, "content", resp) or ""
+        return str(text).strip()[:4000]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("摘要模型调用失败，退回拼接：%s", exc)
+        body = "\n".join(inc.splitlines()[-20:])
+        return ((prev + "\n" + body) if prev else body)[:4000]
 
 
 class ShortTermMemory:
@@ -60,17 +96,73 @@ class ShortTermMemory:
         return row is not None
 
     def load_context(self, session_id: str, n: int = None) -> str:
-        """加载最近 N 轮消息作为上下文。"""
-        n = n or config.SHORT_TERM_WINDOW
+        """上下文分三段拼，缺一段就会整段丢上下文。
+
+        ① 最近 N 轮 → 原文
+        ② 水位线**已盖住**的更早轮次 → 用 session.summary
+        ③ 水位线**还没盖住**的更早轮次 → **仍用原文**
+
+        第三段不能少：摘要是后台线程写的，第 4 轮刚落库时它还没跑完，
+        只拼「摘要 + 最近 3 轮」的话第 1 轮此刻两头都不在 ——
+        数据还在库里，却从提示词里凭空消失。
+        """
+        retain = n or config.MEMORY_RETAIN_TURNS
         with db.connect() as conn:
             cur = conn.cursor()
             cur.execute(
-                "SELECT role, content FROM message WHERE session_id = %s "
-                "ORDER BY id DESC LIMIT %s",
-                (session_id, n),
+                "SELECT COALESCE(summary, ''), COALESCE(summary_until_msg_id, 0) "
+                "FROM session WHERE id = %s",
+                (session_id,),
             )
-            rows = cur.fetchall()[::-1]
-        return "\n".join(f"{r[0]}: {r[1]}" for r in rows)
+            row = cur.fetchone()
+            summary = row[0] if row else ""
+            waterline = int(row[1]) if row else 0
+
+            # 一轮的最大 turn_no，用来算保留窗口的下界
+            cur.execute(
+                "SELECT COALESCE(MAX(turn_no), 0) FROM message WHERE session_id = %s",
+                (session_id,),
+            )
+            max_turn = int(cur.fetchone()[0])
+            cutoff = max(max_turn - retain, 0)
+
+            cur.execute(
+                "SELECT turn_no, role, content FROM message WHERE session_id = %s "
+                "ORDER BY turn_no ASC, id ASC",
+                (session_id,),
+            )
+            rows = cur.fetchall()
+
+        recent: list[str] = []
+        older_raw: list[str] = []
+        for turn_no, role, content in rows:
+            line = f"{role}: {content}"
+            if turn_no > cutoff:
+                recent.append(line)
+            else:
+                older_raw.append(line)
+
+        parts: list[str] = []
+        if summary:
+            parts.append(f"[较早对话摘要]\n{summary}")
+        # 水位线还没盖住的更早轮次：仍然给原文
+        if older_raw and waterline <= 0:
+            parts.append("[更早对话原文]\n" + "\n".join(older_raw))
+        elif older_raw:
+            # 部分覆盖：只把水位线之后的原文补上，避免和摘要重复
+            with db.connect() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT role, content FROM message WHERE session_id = %s "
+                    "  AND turn_no <= %s AND id > %s ORDER BY turn_no ASC, id ASC",
+                    (session_id, cutoff, waterline),
+                )
+                pending = [f"{r[0]}: {r[1]}" for r in cur.fetchall()]
+            if pending:
+                parts.append("[更早对话原文]\n" + "\n".join(pending))
+        if recent:
+            parts.append("[最近对话]\n" + "\n".join(recent))
+        return "\n\n".join(parts)
 
     def save_round(
         self,
@@ -81,13 +173,28 @@ class ShortTermMemory:
     ) -> None:
         title = " ".join((question or "").split())[:SESSION_TITLE_CHARS]
         with db.connect() as conn:
-            conn.execute(
-                "INSERT INTO message (session_id, role, content) VALUES (%s, 'user', %s)",
-                (session_id, question),
+            # 轮号在同一事务里取，并对 session 行加锁：
+            # 同一会话并发两个请求时，不会拿到同一个 turn_no。
+            # "一轮要么整轮落库、要么不落" —— 否则读取侧会在轮中间切开。
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM session WHERE id = %s FOR UPDATE", (session_id,))
+            if cur.fetchone() is None:
+                return
+            cur.execute(
+                "SELECT COALESCE(MAX(turn_no), 0) FROM message WHERE session_id = %s",
+                (session_id,),
             )
-            conn.execute(
-                "INSERT INTO message (session_id, role, content, meta) VALUES (%s, 'assistant', %s, %s)",
-                (session_id, answer, Jsonb(_json_card(card))),
+            turn_no = int(cur.fetchone()[0]) + 1
+
+            cur.execute(
+                "INSERT INTO message (session_id, role, content, turn_no, kind) "
+                "VALUES (%s, 'user', %s, %s, 'human')",
+                (session_id, question, turn_no),
+            )
+            cur.execute(
+                "INSERT INTO message (session_id, role, content, meta, turn_no, kind) "
+                "VALUES (%s, 'assistant', %s, %s, %s, 'ai')",
+                (session_id, answer, Jsonb(_json_card(card)), turn_no),
             )
             # 标题只用首条用户问题。之后的轮次不再改。
             if title:
@@ -96,6 +203,7 @@ class ShortTermMemory:
                     "WHERE id = %s AND COALESCE(title, '') = ''",
                     (title, session_id),
                 )
+        return turn_no
 
     def list_sessions(self, user_id: str, limit: int = SESSION_LIST_LIMIT) -> list[dict[str, Any]]:
         """按最后一条消息时间倒序。没有消息时用 started_at。"""
@@ -106,7 +214,9 @@ class ShortTermMemory:
                        COALESCE(s.title, ''),
                        s.started_at,
                        COALESCE(MAX(m.created_at), s.started_at) AS last_at,
-                       COUNT(m.id)
+                       COUNT(m.id),
+                       COALESCE(s.summary, ''),
+                       COALESCE(MAX(m.turn_no), 0)
                 FROM session s
                 LEFT JOIN message m ON m.session_id = s.id
                 WHERE s.user_id = %s
@@ -123,24 +233,35 @@ class ShortTermMemory:
                 "started_at": row[2],
                 "last_at": row[3],
                 "message_count": row[4],
+                # 接口先给，前端侧栏展不展示是另一个决定（摘要里含过敏/症状）
+                "summary": row[5],
+                "round_count": int(row[6] or 0),
             }
             for row in rows
         ]
 
-    def list_messages(self, user_id: str, session_id: str) -> list[dict[str, Any]] | None:
-        """不是本人的会话返回 None，调用方回 404。"""
+    def list_messages(
+        self, user_id: str, session_id: str, q: str = ""
+    ) -> list[dict[str, Any]] | None:
+        """不是本人的会话返回 None，调用方回 404。
+
+        q 非空时只返回命中的 user 消息（单次会话量小，顺序扫描即可，
+        中文上 pg_trgm 本来就失效，见计划步骤 5.3）。
+        """
         if not self.owns(user_id, session_id):
             return None
+        sid = str(uuid.UUID(str(session_id)))
+        sql = (
+            "SELECT id, role, content, created_at, meta, turn_no FROM message "
+            "WHERE session_id = %s"
+        )
+        args: list[Any] = [sid]
+        if q.strip():
+            sql += " AND role = 'user' AND content ILIKE %s"
+            args.append(f"%{q.strip()}%")
+        sql += " ORDER BY turn_no ASC, id ASC"
         with db.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, role, content, created_at, meta
-                FROM message
-                WHERE session_id = %s
-                ORDER BY created_at ASC, id ASC
-                """,
-                (str(uuid.UUID(str(session_id))),),
-            ).fetchall()
+            rows = conn.execute(sql, tuple(args)).fetchall()
         messages = []
         for row in rows:
             item = {
@@ -148,6 +269,7 @@ class ShortTermMemory:
                 "role": row[1],
                 "content": row[2],
                 "created_at": row[3],
+                "turn_no": row[5],
             }
             meta = row[4] or {}
             if row[1] == "assistant" and isinstance(meta, dict):
@@ -193,16 +315,90 @@ class ShortTermMemory:
             for row in rows
         ]
 
-    def summarize_if_needed(self, session_id: str, summarize_fn) -> None:
-        """超长时滚动摘要（summarize_fn(history) -> summary）。"""
+    def round_count(self, session_id: str) -> int:
         with db.connect() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT count(*) FROM message WHERE session_id = %s", (session_id,))
-            n = cur.fetchone()[0]
-        if n >= config.SESSION_SUMMARY_THRESHOLD:
-            history = self.load_context(session_id, config.SESSION_SUMMARY_THRESHOLD)
-            summary = summarize_fn(history) if summarize_fn else history[:200]
+            row = conn.execute(
+                "SELECT COALESCE(MAX(turn_no), 0) FROM message WHERE session_id = %s",
+                (session_id,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def compress_if_needed(self, session_id: str, summarize_fn=None) -> bool:
+        """滚动摘要。触发只看轮数，写回必须**合并**旧摘要。
+
+        两个容易做错的点：
+
+        1. 只把增量交给模型再 `UPDATE summary=?` 覆盖 —— 第二次压缩会把
+           上一次的摘要换掉，长会话里只剩最后一段增量。必须把 prev 一起给模型。
+        2. 触发条件里塞 token 预算 —— 按 `cutoff = 轮数 - 保留数`，轮数 ≤ 保留数时
+           没有可摘要的行，> 保留数时轮数条件已经触发，预算是个死条件。
+           所以这里只按轮数触发（4.4 的答案维持"当前没有按阈值压缩"）。
+
+        失败不推进水位线：库里的消息还在，下次重试即可，不阻断回答。
+        """
+        if not config.MEMORY_SUMMARY_ENABLED:
+            return False
+        retain = config.MEMORY_RETAIN_TURNS
+
+        try:
             with db.connect() as conn:
-                conn.execute(
-                    "UPDATE session SET summary = %s WHERE id = %s", (summary, session_id)
+                cur = conn.cursor()
+                # NOWAIT：拿不到锁就跳过本轮，不为压缩让请求排队
+                cur.execute(
+                    "SELECT id FROM session WHERE id = %s FOR UPDATE NOWAIT", (session_id,)
                 )
+                if cur.fetchone() is None:
+                    return False
+                cur.execute(
+                    "SELECT COALESCE(summary, ''), COALESCE(summary_until_msg_id, 0) "
+                    "FROM session WHERE id = %s",
+                    (session_id,),
+                )
+                prev_summary, waterline = cur.fetchone()
+                cur.execute(
+                    "SELECT COALESCE(MAX(turn_no), 0) FROM message WHERE session_id = %s",
+                    (session_id,),
+                )
+                max_turn = int(cur.fetchone()[0])
+                cutoff = max_turn - retain
+                if cutoff <= 0:
+                    return False
+                cur.execute(
+                    "SELECT role, content FROM message WHERE session_id = %s "
+                    "  AND turn_no <= %s AND id > %s ORDER BY turn_no ASC, id ASC",
+                    (session_id, cutoff, waterline),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    return False
+                cur.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM message "
+                    "WHERE session_id = %s AND turn_no <= %s",
+                    (session_id, cutoff),
+                )
+                new_waterline = int(cur.fetchone()[0])
+        except Exception as exc:  # noqa: BLE001 —— 并发/读失败都不该影响回答
+            log.warning("跳过本轮压缩：%s", exc)
+            return False
+
+        inc = "\n".join(f"{r[0]}: {r[1]}" for r in rows)
+        fn = summarize_fn or _summarize
+        try:
+            merged = fn(str(prev_summary or ""), inc)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("摘要失败，不推进水位线：%s", exc)
+            return False
+        if not merged:
+            return False
+
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE session SET summary = %s, summary_until_msg_id = %s, "
+                "     summary_updated_at = now() WHERE id = %s",
+                (merged, new_waterline, session_id),
+            )
+        return True
+
+    def summarize_if_needed(self, session_id: str, summarize_fn=None) -> bool:
+        """旧名字，留给可能的调用方。等价于 compress_if_needed。"""
+        return self.compress_if_needed(session_id, summarize_fn)

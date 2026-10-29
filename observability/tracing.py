@@ -36,7 +36,16 @@ def get_client():
 
 @contextmanager
 def trace(question: str, user_id: str = "anonymous"):
-    """为一次问答创建 trace 上下文。"""
+    """为一次问答创建 trace 上下文。
+
+    两处和敏感词有关，都别改回去：
+
+    1. `input` 在进图**之前**就写了原句。图内打码发生在之后，
+       所以命中时调用方要显式调 `redact_trace()` 把 input/output 一起改成占位
+       —— 只改 message 表等于"库里没有、日志里有"。
+    2. 原来 `finally` 里还用原句写了一次 `output`，会**盖掉** `record_result`
+       刚写上去的回答。那是既有问题，顺手去掉了。
+    """
     client = get_client()
     if client is None:
         yield None
@@ -49,7 +58,17 @@ def trace(question: str, user_id: str = "anonymous"):
     try:
         yield trace
     finally:
-        trace.update(output={"question": question})
+        pass
+
+
+def redact_trace(trace, placeholder: str) -> None:
+    """命中敏感词后把这条 trace 的 input / output 换成占位常量。"""
+    if trace is None:
+        return
+    try:
+        trace.update(input={"question": placeholder}, output={"answer": placeholder})
+    except Exception:  # noqa: BLE001 —— 埋点失败不能影响回答
+        pass
 
 
 def record_span(

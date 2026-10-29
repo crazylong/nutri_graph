@@ -205,6 +205,19 @@ def _stage_one(
                 [(bundle_id, *it) for it in items],
             )
 
+    # 命中明细随 bundle 一起落库（步骤 2.2）：入口校验只挡 block 行，
+    # review 级的行照样进队列，审核页要靠这份明细展示给人看。
+    from kg.sensitive import BUNDLE_FIELDS, current_version, hits_json, log_hits, scan_obj
+
+    s_hits = scan_obj(payload, BUNDLE_FIELDS)
+    if s_hits:
+        log_hits("import", s_hits, source=source_key, bundle_id=bundle_id)
+    conn.execute(
+        "UPDATE kg_food_bundle SET sensitive_hits = %s, sensitive_word_version = %s "
+        "WHERE id = %s",
+        (Jsonb(hits_json(s_hits)), current_version(), bundle_id),
+    )
+
     return {"bundle_id": bundle_id, "name": name, "row_no": row_no, "action": action}
 
 

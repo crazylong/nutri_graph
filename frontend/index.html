@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>食疗问答 · nutri_graph</title>
-<link rel="stylesheet" href="/assets/styles.css?v=20261028j">
+<link rel="stylesheet" href="/assets/styles.css?v=20261029a">
 </head>
 <body>
 
@@ -84,11 +84,21 @@
   <div class="history-scroll">
     <p class="history-label">历史会话</p>
     <div id="session-list"></div>
+    <p class="history-label">本轮问过</p>
+    <div id="ask-list"></div>
     <p class="history-label">最近问过</p>
     <div id="recent-list"></div>
   </div>
 </aside>
 <div class="stage">
+<!-- 会话内检索：只匹配自己问过的话，命中高亮 + 上/下跳转。
+     会话内容属敏感个人信息，检索完全在已加载的消息上做，不再出网。 -->
+<div class="thread-tools" id="thread-tools" hidden>
+  <input type="search" id="thread-filter" placeholder="在本轮里找我问过的话…" autocomplete="off">
+  <span class="filter-count" id="filter-count"></span>
+  <button type="button" class="link-btn" id="filter-prev" title="上一个">↑</button>
+  <button type="button" class="link-btn" id="filter-next" title="下一个">↓</button>
+</div>
 <main id="thread" class="thread" aria-live="polite">
   <section class="empty" id="empty">
     <h2>问点具体的，我按图谱里的证据回答</h2>
@@ -162,6 +172,6 @@
   <p class="disclaimer">点食材节点可继续下钻；拖动节点可以拉开被压住的边。</p>
 </aside>
 
-<script src="/assets/app.js?v=20261028j"></script>
+<script src="/assets/app.js?v=20261029a"></script>
 </body>
 </html>

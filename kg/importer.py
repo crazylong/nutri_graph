@@ -717,6 +717,26 @@ def validate_row(
     if not payload["source"]:
         msgs.append(Message("warn", "没填「来源」，这批数据以后无法追溯出处", "来源"))
 
+    # ---------- 敏感词（内容合规）----------
+    # 放在营养素校验之前：内容问题比数值问题更该早失败，
+    # 而且这一关过了才值得去解析十几列数值。
+    from kg.sensitive import scan_obj
+    from kg.sensitive import IMPORT_FIELDS
+
+    s_hits = scan_obj(payload, IMPORT_FIELDS)
+    if s_hits:
+        payload["_sensitive"] = [h.as_dict() for h in s_hits]
+        for h in s_hits:
+            header = dict(IMPORT_FIELDS).get(h.field, h.field)
+            if h.action == "block":
+                msgs.append(
+                    Message("error", f"{header}含不允许的内容，请修改后再导入", header)
+                )
+            else:
+                msgs.append(
+                    Message("warn", f"{header}含需人工确认的表述，入审后请复核", header)
+                )
+
     # ---------- 营养素 ----------
     for col in NUTRIENT_COLUMNS:
         parsed = parse_number(raw.get(col.key), col.unit)

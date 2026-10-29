@@ -65,6 +65,18 @@ PG_POOL_PRE_PING = os.getenv("PG_POOL_PRE_PING", "true").lower() == "true"
 UVICORN_LIMIT_CONCURRENCY = int(os.getenv("UVICORN_LIMIT_CONCURRENCY", "10"))
 
 # ============================================================
+# 敏感词（kg/sensitive.py）
+# ============================================================
+# 关掉只停"输入侧 political 出口"和打码；录入/导入/审核那几道闸不受它影响
+# —— 那几道是内容合规，不是开关能关的。
+SENSITIVE_GUARD_ENABLED = os.getenv("SENSITIVE_GUARD_ENABLED", "true").lower() == "true"
+# 输出扫描：政治类整段替换、疗效类按句剔除（见计划 §3.7）
+SENSITIVE_OUTPUT_SCAN = os.getenv("SENSITIVE_OUTPUT_SCAN", "true").lower() == "true"
+# 将来接第三方内容安全的开关。v3 只有这一个常量 + 注释，**没有适配分支**：
+# 空分支既没验收价值，又会让人误以为已经接通。
+CONTENT_MODERATION_PROVIDER = os.getenv("CONTENT_MODERATION_PROVIDER", "none")
+
+# ============================================================
 # DashScope（LLM + Embedding）
 # ============================================================
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
@@ -167,8 +179,15 @@ LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
 # 记忆配置（PostgreSQL）
 # ============================================================
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
-SHORT_TERM_WINDOW = int(os.getenv("SHORT_TERM_WINDOW", "10"))  # 最近 N 轮
+# 完整保留的**轮**数（不是条数）。上下文 = 最近这些轮原文 + 更早轮次的摘要。
+# 语义从"条"改成"轮"：一轮一旦有 tool 消息（未来）就是 3–5 条，
+# 按条取会在轮中间切开，正好违反"保持一轮对话的完整性"。
+MEMORY_RETAIN_TURNS = int(os.getenv("MEMORY_RETAIN_TURNS", "3"))
+# 兼容旧名：只作为"最多取多少条"的上限保护，不再当作窗口
+SHORT_TERM_WINDOW = int(os.getenv("SHORT_TERM_WINDOW", "10"))
 SESSION_SUMMARY_THRESHOLD = int(os.getenv("SESSION_SUMMARY_THRESHOLD", "30"))  # 超长触发滚动摘要
+# 摘要用便宜模型；失败不推进水位线，下次重试，不阻断回答
+MEMORY_SUMMARY_ENABLED = os.getenv("MEMORY_SUMMARY_ENABLED", "true").lower() == "true"
 MEMORY_FACT_TOP_K = int(os.getenv("MEMORY_FACT_TOP_K", "4"))
 
 # ============================================================

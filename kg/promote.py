@@ -75,12 +75,19 @@ def list_bundles(status: str = "pending_review", limit: int = 20) -> list[dict[s
         cur.execute(
             "SELECT b.id, b.food_key, b.canonical_name, b.english_name, b.scientific_name, "
             "       b.category, b.source_desc, b.score_total, b.source_count, b.hard_veto, "
-            "       b.status, b.canonical_id, b.created_at, b.source_key "
+            "       b.status, b.canonical_id, b.created_at, b.source_key, "
+            "       COALESCE(b.sensitive_hits, '[]'::jsonb) AS sensitive_hits "
             "FROM kg_food_bundle b WHERE b.status = %s ORDER BY b.id LIMIT %s",
             (status, limit),
         )
         cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    # 列表只给摘要：有几个 block、几个待确认。审核员在列表上就能看出该先看哪条。
+    for row in rows:
+        hits = row.get("sensitive_hits") or []
+        row["sensitive_block"] = sum(1 for h in hits if h.get("action") == "block")
+        row["sensitive_review"] = sum(1 for h in hits if h.get("action") == "review")
+    return rows
 
 
 def get_bundle(bundle_id: int) -> dict[str, Any]:
@@ -90,7 +97,8 @@ def get_bundle(bundle_id: int) -> dict[str, Any]:
             "SELECT id, request_id, food_key, canonical_name, english_name, scientific_name, "
             "       category, nature, aliases, source_key, external_id, source_desc, "
             "       evidence_type, score_total, score_detail, source_count, sources, "
-            "       hard_veto, status, canonical_id, reviewer, reviewed_at, reject_reason "
+            "       hard_veto, status, canonical_id, reviewer, reviewed_at, reject_reason, "
+            "       COALESCE(sensitive_hits, '[]'::jsonb) AS sensitive_hits "
             "FROM kg_food_bundle WHERE id = %s",
             (bundle_id,),
         )
@@ -99,6 +107,13 @@ def get_bundle(bundle_id: int) -> dict[str, Any]:
             raise PromoteError(f"bundle {bundle_id} 不存在")
         cols = [d[0] for d in cur.description]
         bundle = dict(zip(cols, row))
+        # 审核页看不到命中就等于没提示：这里顺手按当前词表再扫一次，
+        # 避免"落库后词表更新了"导致页面上显示的是旧结果。
+        from kg.sensitive import BUNDLE_FIELDS, scan_obj
+
+        bundle["sensitive_hits_live"] = [
+            h.as_dict() for h in scan_obj(bundle, BUNDLE_FIELDS)
+        ]
 
         cur.execute(
             "SELECT id, item_type, field_name, field_value, unit, source_locator, "
@@ -235,11 +250,26 @@ def _upsert_ingredient_candidate(
     )
 
 
+def _sensitive_gate(
+    conn, bundle_id: int, obj: dict, *, confirm: bool, reviewer: str
+) -> None:
+    """bundle 批准口的敏感词硬闸。命中就转成 PromoteError（api/admin 已映射 409）。"""
+    from kg.sensitive import SensitiveBlocked, assert_bundle_approvable
+
+    try:
+        assert_bundle_approvable(
+            conn, bundle_id, obj, confirm=confirm, reviewer=reviewer
+        )
+    except SensitiveBlocked as exc:
+        raise PromoteError(str(exc)) from exc
+
+
 def approve_bundle(
     bundle_id: int,
     reviewer: str = "admin",
     item_ids: list[int] | None = None,
     merge_now: bool = True,
+    confirm_sensitive: bool = False,
 ) -> dict[str, Any]:
     """通过一个 bundle：翻译成节点/边候选，并（默认）立即合并进主图。
 
@@ -293,6 +323,26 @@ def approve_bundle(
             raise PromoteError("缺少 canonical_name，无法建节点")
         if not (fields.get("category") or category):
             raise PromoteError("缺少 category，无法建节点")
+
+        # ---------- 敏感词硬闸（步骤 2.3）----------
+        # 入口过滤是"效率闸"，这里是"责任闸"：人签字之前后端必须自己再扫一遍，
+        # 防的是"入口没拦住的存量数据被批准"和"审核员手滑 / 被社工"。
+        _sensitive_gate(
+            conn,
+            bundle_id,
+            {
+                "canonical_name": name,
+                "aliases": bundle_aliases or [],
+                "english_name": english_name,
+                "scientific_name": scientific_name,
+                "source_desc": source_desc,
+                # 导入 payload 的 note / source 在 items 上，不在 bundle 行里
+                "note": fields.get("note", ""),
+                "source": fields.get("source", ""),
+            },
+            confirm=confirm_sensitive,
+            reviewer=reviewer,
+        )
 
         # 别名也参与身份判定：导入表里写「北豆腐」，别名有「老豆腐」，
         # 若「老豆腐」已经挂在既有节点上，就该挂过去，而不是再建一个。

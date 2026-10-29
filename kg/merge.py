@@ -190,6 +190,29 @@ def merge(
     if skipped:
         log.warning("跳过 %d 条 UNRESOLVED 目标节点", skipped)
 
+    # 最后一道敏感词闸（步骤 2.5）：防"批准之后词表更新了"或有人直连 PG 改了 status。
+    # 这里读得到的是边的 claim_text —— source_desc / note 不在这份结果里，
+    # 那两个字段在 bundle 批准时扫（见 kg.sensitive.assert_bundle_approvable）。
+    from kg.sensitive import log_hits, scan
+
+    clean = []
+    for r in valid:
+        hits = scan(str(r.get("claim_text") or ""), field_name="claim_text")
+        if not hits:
+            clean.append(r)
+            continue
+        log_hits("review", hits, source="merge")
+        if any(h.action == "block" for h in hits):
+            log.error(
+                "边候选 %s 命中敏感词，拒绝合并（claim_text 前 40 字：%s）",
+                r.get("id"), str(r.get("claim_text") or "")[:40],
+            )
+        else:
+            clean.append(r)
+    if len(clean) != len(valid):
+        log.warning("敏感词闸拦下 %d 条边候选", len(valid) - len(clean))
+    valid = clean
+
     driver = _driver()
     merged_ids = []
     try:

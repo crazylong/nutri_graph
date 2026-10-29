@@ -42,6 +42,9 @@ class RejectRequest(BaseModel):
 class ApproveBundleRequest(BaseModel):
     item_ids: list[int] | None = Field(None, description="只采用这些项；空表示全部")
     merge: bool = Field(True, description="通过后立即合并进主图")
+    # 命中 review 级敏感词时必须显式确认：前端要先把命中项展示给人看，
+    # 由人勾一次"已人工确认"，而不是后端悄悄放行
+    confirm_sensitive: bool = Field(False, description="已人工确认 review 级敏感词")
 
 
 # ============================================================
@@ -136,7 +139,13 @@ def list_candidates(
     return {"status": status, "count": len(rows), "items": rows}
 
 
-def _set_status(candidate_id: int, status: str, reviewer: str, reason: str = "") -> dict:
+def _set_status(
+    candidate_id: int,
+    status: str,
+    reviewer: str,
+    reason: str = "",
+    confirm_sensitive: bool = False,
+) -> dict:
     with db.connect() as conn:
         if not _table_exists(conn, "kg_candidate"):
             raise HTTPException(
@@ -144,6 +153,31 @@ def _set_status(candidate_id: int, status: str, reviewer: str, reason: str = "")
                 detail={"code": "table_missing", "message": f"kg_candidate 表不存在，{_MISSING_TABLE_HINT}"},
             )
         cur = conn.cursor()
+
+        # 批准前先过敏感词闸。这个口直接 UPDATE kg_candidate，
+        # 而 kg.merge 消费 status='approved' —— 它是页面上真在用的关系候选批准口，
+        # 漏掉它等于闸只关了一半（步骤 2.4）。
+        if status == "approved":
+            from kg.sensitive import SensitiveBlocked, assert_approvable, log_hits, scan
+
+            row0 = cur.execute(
+                "SELECT dst_name, claim_text FROM kg_candidate WHERE id = %s",
+                (candidate_id,),
+            ).fetchone()
+            hits = []
+            if row0:
+                hits += scan(str(row0[0] or ""), field_name="name")
+                hits += scan(str(row0[1] or ""), field_name="claim_text")
+            if hits:
+                log_hits("review", hits, source="admin_set_status")
+            try:
+                assert_approvable(hits, confirm=confirm_sensitive)
+            except SensitiveBlocked as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "sensitive_blocked", "message": str(exc)},
+                ) from exc
+
         cur.execute(
             "UPDATE kg_candidate SET status = %s, reviewer = %s, reviewed_at = now() "
             "WHERE id = %s AND status IN ('pending', 'approved') RETURNING id, status",
@@ -230,6 +264,7 @@ def approve_bundle(
             reviewer=admin["user_id"],
             item_ids=req.item_ids,
             merge_now=req.merge,
+            confirm_sensitive=req.confirm_sensitive,
         )
     except promote.PromoteError as exc:
         msg = str(exc)

@@ -26,6 +26,47 @@ _query = GraphQuery()
 # ============================================================
 # guard —— 安全前置（红旗症状拦截）
 # ============================================================
+def sensitive_guard_node(state: dict) -> dict:
+    """输入侧只处理 political。
+
+    疗效词出现在问句里是**问法**不是词条 —— 用户问「菠菜能治疗贫血吗」，
+    「治疗」是提问方式，菠菜是已收录食材。整句拦成"我没法当作食材来回答"
+    就是把一次正常咨询答成了拒答。那一类由 register() 的 block 和输出扫描兜住。
+
+    挂在这里（guard 之后、normalize 之前）是为了零副作用：
+    不做实体链接、不打向量兜底、不产生别名候选。
+    """
+    if not config.SENSITIVE_GUARD_ENABLED:
+        return {}
+    try:
+        from kg.sensitive import POLITICAL_ANSWER, log_hits, scan_political
+
+        hits = scan_political(state.get("question") or "")
+    except Exception as exc:  # noqa: BLE001 —— 词表读不到不能让 /chat 挂掉
+        log.warning("敏感词扫描失败，本次不拦截：%s", exc)
+        return {}
+    if not hits:
+        return {}
+
+    log_hits("input", hits, source="chat")
+    return {
+        "answer": POLITICAL_ANSWER,
+        "basis": [],
+        "gaps": [],
+        "confidence": 1.0,
+        "_graph_hit": False,
+        "_degraded": False,
+        "_redact": True,
+        "_food_requests": [],
+    }
+
+
+def route_after_sensitive(state: dict) -> str:
+    if state.get("_redact"):
+        return "memory_write"
+    return "continue"
+
+
 def guard_node(state: dict) -> dict:
     q = state["question"]
     for sym in config.RED_FLAG_SYMPTOMS:
@@ -137,17 +178,25 @@ def uncatalogued_node(state: dict) -> dict:
     else:
         answer = "\n".join(r.message for r in results)
 
+    # 敏感词命中：不回显。
+    # register() 拒绝写入只挡住了"写库"这一半 —— gaps 和 _food_requests 是用
+    # r.term 拼的，原词照样会回显给前端。所以这里要把这批结果整个摘掉。
+    visible = [
+        r for r in results
+        if not (r.action == "rejected_not_food" and r.code == "sensitive")
+    ]
+
     return {
         "answer": answer,
         "basis": [],
-        "gaps": [f"图谱未收录：{r.food_key or r.term}" for r in results] or ["未能识别食材"],
+        "gaps": [f"图谱未收录：{r.food_key or r.term}" for r in visible] or ["未能识别食材"],
         "confidence": 0.0,
         "_graph_hit": False,
         "_degraded": False,
         "_food_requests": [
             {"term": r.term, "food_key": r.food_key, "action": r.action,
              "request_id": r.request_id, "status": r.status, "hit_count": r.hit_count}
-            for r in results
+            for r in visible
         ],
     }
 
@@ -459,6 +508,20 @@ def _complete_from_prompt(prompt: str, note: str = "", degraded: bool = False) -
     }
     if degraded:
         out["_degraded"] = True
+
+    # ---------- 输出扫描（步骤 2.9 / 计划 §3.7）----------
+    # 只扫模型生成的正文：免责声明是单独字段（config.DISCLAIMER），不在这里，
+    # 不会被扫到 —— 那条默认文案含「诊断」，扫它每条正常回答都会命中。
+    if config.SENSITIVE_OUTPUT_SCAN:
+        try:
+            from kg.sensitive import log_hits, rewrite_answer
+
+            cleaned, hits = rewrite_answer(answer)
+            if hits:
+                log_hits("output", hits, source="chat")
+                out["answer"] = cleaned
+        except Exception as exc:  # noqa: BLE001 —— 扫描失败不能让回答消失
+            log.warning("输出扫描失败，原样返回：%s", exc)
     return out
 
 
@@ -497,6 +560,22 @@ def _defer_profile(user_id: str, question: str, answer: str) -> None:
         daemon=True,
         name="profile-extract",
     ).start()
+
+
+def _defer_compress(session_id: str) -> None:
+    """后台做滚动摘要。失败不影响回答：摘要失败不推进水位线，下次重试。"""
+    if not config.MEMORY_ENABLED or not config.MEMORY_SUMMARY_ENABLED:
+        return
+
+    def _run():
+        try:
+            from memory.short_term import ShortTermMemory
+
+            ShortTermMemory().compress_if_needed(session_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("滚动摘要失败（不影响回答）：%s", exc)
+
+    threading.Thread(target=_run, daemon=True, name="session-compress").start()
 
 
 # ============================================================
@@ -546,17 +625,47 @@ def memory_write_node(state: dict) -> dict:
         except Exception as exc:  # noqa: BLE001 —— 卡片翻译失败仍要留下文字
             log.warning("回答卡片翻译失败：%s", exc)
             card = {}
-        stm.save_round(session_id, state["question"], state.get("answer", ""), card)
+        # 打码只动用户侧：助手侧保留原文（政治类固定话术本来就不含原词；
+        # 红旗就医回答复述的是症状词，§1.6 第 2 点要求保留 —— 换成占位是安全风险）
+        redact = bool(state.get("_redact"))
+        from kg.sensitive import REDACT
+
+        if not redact:
+            # sink 兜底（步骤 4.3b）：红旗短路那一轮直接来这里，
+            # sensitive_guard 根本不会跑。不在这里补扫，含政治词的红旗问句
+            # 会原样落库。放在落库前而不是节点顺序里，是为了将来任何新增的
+            # 早退节点都不会绕过它。
+            try:
+                from kg.sensitive import log_hits, scan_political
+
+                hits = scan_political(state.get("question") or "")
+                if hits:
+                    log_hits("input", hits, source="memory_write")
+                    redact = True
+            except Exception as exc:  # noqa: BLE001
+                log.warning("落库前政治类扫描失败（不打码）：%s", exc)
+
+        stm.save_round(
+            session_id,
+            REDACT if redact else state["question"],
+            state.get("answer", ""),
+            card,
+        )
 
         # 画像要再打一次模型，而且不进当前这轮回答。放在请求里等，
         # 有图事实时用户会把这次耗时和生成叠在一起。没提到约束就直接跳过。
         question = state.get("question") or ""
         if (
-            state.get("consent_profile", True)
+            not redact  # 打码的问句不能再发给模型做画像
+            and state.get("consent_profile", True)
             and config.DASHSCOPE_API_KEY
             and mentions_health_constraint(question)
         ):
             _defer_profile(user_id, question, state.get("answer", ""))
+
+        # 滚动摘要：落库之后起后台线程（步骤 4.6）。
+        # 绝不能放在 generate 之前同步调 —— 每轮多一次 LLM 往返。
+        _defer_compress(session_id)
         return {"session_id": session_id}
     except Exception as e:  # noqa: BLE001 —— 记忆失败不阻断主流程
         log.warning("memory_write 失败：%s", e)

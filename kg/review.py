@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 import psycopg
 
@@ -41,8 +42,30 @@ def cmd_list(args):
 
 
 def cmd_approve(args):
+    """CLI 也要过敏感词闸 —— 它绕过所有 API，留着就是第二条绕过路径（步骤 2.4）。"""
     ids = [int(x) for x in args.ids.split(",") if x.strip()]
+    from kg.sensitive import SensitiveBlocked, assert_approvable, log_hits, scan
+
     with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, dst_name, claim_text FROM kg_candidate WHERE id = ANY(%s)",
+            (ids,),
+        )
+        rows = cur.fetchall()
+        hits = []
+        for cid, dst_name, claim_text in rows:
+            hits += scan(str(dst_name or ""), field_name="name")
+            hits += scan(str(claim_text or ""), field_name="claim_text")
+        if hits:
+            log_hits("review", hits, source="cli_approve")
+        try:
+            assert_approvable(hits, confirm=getattr(args, "confirm_sensitive", False))
+        except SensitiveBlocked as exc:
+            print(f"未批准：{exc}", file=sys.stderr)
+            print("确认无误后加 --confirm-sensitive 再跑。", file=sys.stderr)
+            raise SystemExit(2) from exc
+
         conn.execute(
             "UPDATE kg_candidate SET status = 'approved', reviewer = %s, reviewed_at = now() "
             "WHERE id = ANY(%s)",
@@ -85,6 +108,11 @@ def main():
 
     sp_app = sub.add_parser("approve")
     sp_app.add_argument("--ids", required=True)
+    sp_app.add_argument(
+        "--confirm-sensitive",
+        action="store_true",
+        help="命中 review 级敏感词时，显式确认已人工看过",
+    )
     sp_app.set_defaults(fn=cmd_approve)
 
     sp_rej = sub.add_parser("reject")

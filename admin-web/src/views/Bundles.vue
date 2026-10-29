@@ -12,6 +12,17 @@
       <el-table-column prop="canonical_name" label="规范名" />
       <el-table-column prop="status" label="状态" width="140" />
       <el-table-column prop="score_total" label="评分" width="90" />
+      <el-table-column label="敏感词" width="140">
+        <template #default="{ row }">
+          <el-tag v-if="row.sensitive_block" type="danger" size="small">
+            阻断 {{ row.sensitive_block }}
+          </el-tag>
+          <el-tag v-else-if="row.sensitive_review" type="warning" size="small">
+            待确认 {{ row.sensitive_review }}
+          </el-tag>
+          <span v-else class="muted">—</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="source_desc" label="来源说明" />
     </el-table>
     <p class="hint">驳回在明细页操作。这个列表没有 offset，一次最多 50 条。</p>
@@ -53,4 +64,6 @@ onMounted(reload)
 .bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
 .bar h2 { margin: 0; flex: 1; }
 .hint { color: #909399; font-size: 13px; }
+.muted { color: #c0c4cc; }
+.el-tag + .el-tag { margin-left: 4px; }
 </style>

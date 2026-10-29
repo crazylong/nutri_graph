@@ -33,6 +33,10 @@ class RAGState(TypedDict, total=False):
     # 记忆
     _memory_context: str
     _user_profile: dict[str, Any]
+    # 命中敏感词：memory_write 见到它就只打码用户侧 + 会话标题，并跳过画像抽取。
+    # ⚠️ 必须在这里声明：RAGState 是 TypedDict，没声明的键会被 LangGraph 丢掉，
+    #    节点里能读到、下一个节点读不到（这就是打码不生效的原因）。
+    _redact: bool
 
     # 生成
     answer: str

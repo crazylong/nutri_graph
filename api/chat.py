@@ -70,11 +70,17 @@ def chat(payload: dict, who: dict | None = Depends(get_principal)):
         "consent_profile": consent_profile,
     }
 
-    from observability.tracing import record_result, trace
+    from observability.tracing import record_result, redact_trace, trace
 
     with trace(question, user_id) as tr:
         result = agent.invoke(state)
         elapsed_ms = (time.time() - t0) * 1000
+        # 原句在进图之前就写进了 trace 的 input，图内的打码管不到它。
+        # 命中时三处（message / 画像 / trace）必须用同一个占位常量。
+        if tr is not None and result.get("_redact"):
+            from kg.sensitive import REDACT
+
+            redact_trace(tr, REDACT)
         if tr is not None:
             record_result(
                 tr,

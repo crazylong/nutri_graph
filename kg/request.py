@@ -203,6 +203,21 @@ def register(
         )
 
     term, method = normalize_food_term(raw)
+
+    # 敏感词：不登记、不回显。
+    # 政治类问句在 sensitive_guard 里就被截住了（连 normalize 都到不了）；
+    # 这里挡的是"把疗效词 / 政治词当成食材名来问"的那一路 —— 它确实会走到
+    # uncatalogued_node，而那个出口会把词原样拼进 gaps 和 _food_requests。
+    from kg.sensitive import log_hits, scan
+
+    s_hits = scan(term or raw, field_name="name")
+    if any(h.action == "block" for h in s_hits):
+        log_hits("import", s_hits, source=source)
+        return RegisterResult(
+            action="rejected_not_food", term="", method=method, code="sensitive",
+            message="没能识别出具体是哪种食材，换一个说法试试（比如「黑豆」）？",
+        )
+
     if not is_plausible_food(term):
         return RegisterResult(
             action="rejected_not_food", term=term, method=method, code="not_food",

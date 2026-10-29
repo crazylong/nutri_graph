@@ -203,6 +203,25 @@ def _persist(
         }
     ]
 
+    # 抓取落库前扫一遍：USDA 的 description 是外部文本，可能带营销词。
+    # 命中 block 就整条不落库 —— 让任务失败并留下原因，比落一条待审数据
+    # 再等审核员发现要干净。
+    from kg.sensitive import BUNDLE_FIELDS, SensitiveBlocked, log_hits, scan_obj
+
+    s_hits = scan_obj(
+        {
+            "canonical_name": draft.canonical_name,
+            "english_name": draft.english_name,
+            "scientific_name": draft.scientific_name,
+            "source_desc": desc,
+        },
+        BUNDLE_FIELDS,
+    )
+    if s_hits:
+        log_hits("import", s_hits, source="usda_fdc")
+        if any(h.action == "block" for h in s_hits):
+            raise SensitiveBlocked(s_hits)
+
     with db.connect() as conn:
         # 重跑覆盖：先删旧 bundle（items 靠外键级联）
         conn.execute("DELETE FROM kg_food_bundle WHERE request_id = %s", (task["request_id"],))
