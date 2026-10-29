@@ -113,6 +113,7 @@ def _items(payload: dict, job_id: str, row_no: int) -> list[tuple]:
 def _stage_one(
     conn, payload: dict, job_id, filename: str, row_no: int, verdict: str,
     source_key: str = IMPORT_SOURCE_KEY,
+    request_id: int | None = None,
 ) -> dict:
     food_key = payload["name_norm"]
     name = payload["name"]
@@ -149,7 +150,8 @@ def _stage_one(
             "  external_id = %s, source_desc = %s, "
             "  score_total = %s, score_detail = %s, source_count = 1, sources = %s, "
             "  hard_veto = '', status = 'pending_review', evidence_type = 'measured', "
-            "  reviewer = '', reviewed_at = NULL, reject_reason = '' "
+            "  reviewer = '', reviewed_at = NULL, reject_reason = '', "
+            "  request_id = COALESCE(%s, request_id) "
             "WHERE id = %s",
             (
                 name,
@@ -163,6 +165,7 @@ def _stage_one(
                 IMPORT_SCORE,
                 detail,
                 sources,
+                request_id,
                 bundle_id,
             ),
         )
@@ -175,10 +178,11 @@ def _stage_one(
             "   category, nature, aliases, source_key, external_id, source_desc, "
             "   score_total, score_detail, source_count, sources, hard_veto, status, "
             "   evidence_type) "
-            "VALUES (NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,'','pending_review',"
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,'','pending_review',"
             "        'measured') "
             "RETURNING id",
             (
+                request_id,
                 food_key,
                 name,
                 payload.get("english_name") or "",
@@ -226,22 +230,34 @@ def stage_bundles(
     job_id,
     filename: str = "",
     source_key: str = IMPORT_SOURCE_KEY,
+    *,
+    conn=None,
+    request_id: int | None = None,
 ) -> list[dict]:
     """把校验通过的行写进审核队列。整批一个事务：要么全进，要么全不进。
 
     重复上传同一食材会覆盖它「未结」的那份 bundle（pending_review / approved），
     已经 merged 的历史不动 —— 那是主图里已有的数据，改它要走新的审核。
+    conn 由调用方传入时不在这里提交。
     """
     todo = [r for r in rows if r.verdict in _PASS_VERDICTS and r.payload.get("name_norm")]
     if not todo:
         return []
 
-    out: list[dict] = []
-    with db.connect() as conn:
-        for r in todo:
-            out.append(
-                _stage_one(conn, r.payload, job_id, filename, r.row_no, r.verdict, source_key)
+    def _write(c) -> list[dict]:
+        return [
+            _stage_one(
+                c, r.payload, job_id, filename, r.row_no, r.verdict, source_key,
+                request_id=request_id,
             )
+            for r in todo
+        ]
+
+    if conn is None:
+        with db.connect() as owned:
+            out = _write(owned)
+    else:
+        out = _write(conn)
     log.info(
         "导入落库 source=%s job=%s 共 %d 行：新增 %d 覆盖 %d",
         source_key, job_id, len(out),

@@ -302,6 +302,7 @@ def process_task(task: dict, client: UsdaClient | None = None) -> dict:
         d = draft_mod.get_draft(food_key)
     except draft_mod.DraftError as exc:
         _finish(task["id"], "failed", f"画像生成失败：{exc}")
+        _set_request_status(task["request_id"], "rejected")
         return {"task_id": task["id"], "food_key": food_key, "status": "failed",
                 "reason": f"画像生成失败：{exc}"}
 
@@ -313,6 +314,8 @@ def process_task(task: dict, client: UsdaClient | None = None) -> dict:
             retry = task["attempts"] < MAX_ATTEMPTS
             _finish(task["id"], "queued" if retry else "failed", msg,
                     retry_in_h=0.5 * task["attempts"] if retry else None)
+            if not retry:
+                _set_request_status(task["request_id"], "rejected")
             return {"task_id": task["id"], "food_key": food_key, "status": "no_match",
                     "reason": msg}
 
@@ -332,11 +335,14 @@ def process_task(task: dict, client: UsdaClient | None = None) -> dict:
         retry = exc.retryable and task["attempts"] < MAX_ATTEMPTS
         _finish(task["id"], "queued" if retry else "failed", str(exc),
                 retry_in_h=0.5 * task["attempts"] if retry else None)
+        if not retry:
+            _set_request_status(task["request_id"], "rejected")
         return {"task_id": task["id"], "food_key": food_key, "status": "error",
                 "reason": str(exc), "retry": retry}
     except Exception as exc:  # noqa: BLE001 —— 单个任务失败不能带崩整批
         log.exception("抓取任务 #%s 异常", task["id"])
         _finish(task["id"], "failed", str(exc))
+        _set_request_status(task["request_id"], "rejected")
         return {"task_id": task["id"], "food_key": food_key, "status": "failed",
                 "reason": str(exc)[:200]}
 

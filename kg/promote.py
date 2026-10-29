@@ -548,43 +548,53 @@ def sync_aliases(
     aliases: list[str],
     source: str = "",
     confidence: float = 0.9,
+    conn=None,
 ) -> dict[str, Any]:
     """把别名写进 dict_alias。
 
     绝不抢别人的别名：如果某个名字已经挂在另一个 canonical_id 上，
     跳过并记日志。这一步是「乌豆 / 黑大豆 不能变成第二个黑豆」的最后一道闸 ——
     宁可新食材查不到，也不能让同一个名字指向两个节点。
+
+    conn 由调用方传入时，不在这里提交，方便和登记状态放在同一个事务里。
     """
+    if conn is None:
+        with db.connect() as owned:
+            return _sync_aliases(owned, canonical_id, aliases, source, confidence)
+    return _sync_aliases(conn, canonical_id, aliases, source, confidence)
+
+
+def _sync_aliases(conn, canonical_id, aliases, source, confidence) -> dict[str, Any]:
     written, skipped = [], []
     norm_map = {normalize_text(a): a for a in aliases if normalize_text(a)}
 
-    with db.connect() as conn:
-        for norm, raw in norm_map.items():
-            row = conn.execute(
-                "SELECT canonical_id FROM dict_alias "
-                "WHERE entity_type = 'Ingredient' AND alias_norm = %s "
-                "  AND canonical_id <> %s LIMIT 1",
-                (norm, canonical_id),
-            ).fetchone()
-            if row:
-                skipped.append({"alias": raw, "occupied_by": row[0]})
-                log.warning("别名「%s」已被 %s 占用，跳过", raw, row[0])
-                continue
-            conn.execute(
-                "INSERT INTO dict_alias (entity_type, canonical_id, alias, alias_norm, "
-                "source, confidence) VALUES ('Ingredient', %s, %s, %s, %s, %s) "
-                "ON CONFLICT DO NOTHING",
-                (canonical_id, raw, norm, source, confidence),
-            )
-            written.append(raw)
+    for norm, raw in norm_map.items():
+        row = conn.execute(
+            "SELECT canonical_id FROM dict_alias "
+            "WHERE entity_type = 'Ingredient' AND alias_norm = %s "
+            "  AND canonical_id <> %s LIMIT 1",
+            (norm, canonical_id),
+        ).fetchone()
+        if row:
+            skipped.append({"alias": raw, "occupied_by": row[0]})
+            log.warning("别名「%s」已被 %s 占用，跳过", raw, row[0])
+            continue
+        conn.execute(
+            "INSERT INTO dict_alias (entity_type, canonical_id, alias, alias_norm, "
+            "source, confidence) VALUES ('Ingredient', %s, %s, %s, %s, %s) "
+            "ON CONFLICT DO NOTHING",
+            (canonical_id, raw, norm, source, confidence),
+        )
+        written.append(raw)
 
-        if norm_map:
-            conn.execute(
-                "UPDATE dict_alias_candidate SET status = 'approved', "
-                "suggested_canonical_id = %s "
-                "WHERE entity_type = 'Ingredient' AND alias_norm = ANY(%s)",
-                (canonical_id, list(norm_map)),
-            )
+    # 只改这次真正写上的词。被占用的不在 written 里，候选状态保持原样。
+    if written:
+        conn.execute(
+            "UPDATE dict_alias_candidate SET status = 'approved', "
+            "suggested_canonical_id = %s "
+            "WHERE entity_type = 'Ingredient' AND alias_norm = ANY(%s)",
+            (canonical_id, [normalize_text(w) for w in written]),
+        )
     return {"written": written, "skipped": skipped}
 
 

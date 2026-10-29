@@ -12,15 +12,22 @@ api/admin.py —— 管理员接口（needs 13 授权的落地对象，也是 Ph
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
+import uuid
+from pathlib import Path
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 import config
 from api.deps import require_admin
 
 import db
+
+_ROOT = Path(__file__).resolve().parents[1]
 
 log = logging.getLogger("api.admin")
 
@@ -326,6 +333,25 @@ class ManualFoodRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
 
 
+class AliasAttach(BaseModel):
+    canonical_id: str = Field(..., min_length=1, max_length=40)
+    alias: str = Field(..., min_length=1, max_length=40)
+
+
+class BatchRequestAction(BaseModel):
+    ids: list[int] = Field(..., min_length=1, max_length=200)
+    action: str = Field(..., pattern="^(reject|ignore_noise)$")
+    reason: str = Field("", max_length=500)
+
+
+_REQUEST_COLUMNS = (
+    "r.id, r.food_key, r.raw_mention, r.normalized, r.requested_by, r.source, "
+    "r.hit_count, r.status, r.reject_reason, r.last_requested_at, r.created_at, "
+    "r.triage, r.triage_hit_id, r.triage_at, r.handled_by, r.handled_at, "
+    "t.id AS task_id, t.status AS task_status"
+)
+
+
 def _require_named_table(conn, name: str, message: str) -> None:
     if not _table_exists(conn, name):
         raise HTTPException(
@@ -348,33 +374,42 @@ def _rows(cur) -> list[dict]:
 def list_food_requests(
     status: str = Query("", pattern=f"^({_REQUEST_STATUSES})?$"),
     keyword: str = Query("", max_length=80),
+    sort: str = Query("recent", pattern="^(recent|hits)$"),
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """未收录食物。count 是符合筛选的总条数，不是本页条数。"""
+    """未收录食物。count 是符合筛选的总条数，不是本页条数。
+
+    triage 三列只读上次反查的结果，打开列表不再打图。
+    """
     where = ["TRUE"]
     args: list = []
     if status:
-        where.append("status = %s")
+        where.append("r.status = %s")
         args.append(status)
     if keyword.strip():
         where.append(
-            "(food_key ILIKE %s ESCAPE '\\' OR raw_mention ILIKE %s ESCAPE '\\' "
-            "OR normalized ILIKE %s ESCAPE '\\')"
+            "(r.food_key ILIKE %s ESCAPE '\\' OR r.raw_mention ILIKE %s ESCAPE '\\' "
+            "OR r.normalized ILIKE %s ESCAPE '\\')"
         )
         pat = _like(keyword.strip())
         args.extend([pat, pat, pat])
     clause = " AND ".join(where)
+    order = (
+        "r.hit_count DESC, r.id DESC"
+        if sort == "hits"
+        else "r.last_requested_at DESC, r.id DESC"
+    )
     with db.connect() as conn:
         _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
         cur = conn.cursor()
-        cur.execute(f"SELECT count(*) FROM kg_ingredient_request WHERE {clause}", args)
+        cur.execute(f"SELECT count(*) FROM kg_ingredient_request r WHERE {clause}", args)
         total = int(cur.fetchone()[0])
         cur.execute(
-            "SELECT id, food_key, raw_mention, normalized, requested_by, source, "
-            "hit_count, status, reject_reason, last_requested_at, created_at "
-            f"FROM kg_ingredient_request WHERE {clause} "
-            "ORDER BY last_requested_at DESC, id DESC LIMIT %s OFFSET %s",
+            f"SELECT {_REQUEST_COLUMNS} "
+            "FROM kg_ingredient_request r "
+            "LEFT JOIN kg_fetch_task t ON t.request_id = r.id "
+            f"WHERE {clause} ORDER BY {order} LIMIT %s OFFSET %s",
             [*args, limit, offset],
         )
         items = _rows(cur)
@@ -387,9 +422,10 @@ def get_food_request(request_id: int):
         _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, food_key, raw_mention, normalized, requested_by, source, "
-            "hit_count, status, reject_reason, last_requested_at, created_at "
-            "FROM kg_ingredient_request WHERE id = %s",
+            f"SELECT {_REQUEST_COLUMNS} "
+            "FROM kg_ingredient_request r "
+            "LEFT JOIN kg_fetch_task t ON t.request_id = r.id "
+            "WHERE r.id = %s",
             (request_id,),
         )
         rows = _rows(cur)
@@ -401,18 +437,41 @@ def get_food_request(request_id: int):
     return rows[0]
 
 
+def _stop_task(cur, request_id: int) -> None:
+    cur.execute(
+        "UPDATE kg_fetch_task SET status = 'rejected' WHERE request_id = %s",
+        (request_id,),
+    )
+
+
+def _log_action(cur, request_id: int, action: str, actor: str, payload: dict) -> None:
+    cur.execute(
+        "INSERT INTO kg_request_action (request_id, action, payload, actor) "
+        "VALUES (%s, %s, %s, %s)",
+        (request_id, action, Jsonb(payload), actor),
+    )
+
+
 @router.post("/kg/requests/{request_id}/reject")
-def reject_food_request(request_id: int, req: RejectRequest):
-    """驳回未收录登记。理由可以空，空也写成空字符串。"""
+def reject_food_request(
+    request_id: int,
+    req: RejectRequest,
+    admin: dict = Depends(require_admin),
+):
+    """驳回未收录登记。理由可以空，空也写成空字符串。同时停掉抓取。"""
     with db.connect() as conn:
         _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
         cur = conn.cursor()
         cur.execute(
-            "UPDATE kg_ingredient_request SET status = 'rejected', reject_reason = %s "
+            "UPDATE kg_ingredient_request SET status = 'rejected', reject_reason = %s, "
+            "handled_by = %s, handled_at = now() "
             "WHERE id = %s RETURNING id, status, reject_reason",
-            (req.reason, request_id),
+            (req.reason, admin["user_id"], request_id),
         )
         row = cur.fetchone()
+        if row is not None:
+            _stop_task(cur, request_id)
+            _log_action(cur, request_id, "reject", admin["user_id"], {"reason": req.reason})
     if row is None:
         raise HTTPException(
             status_code=404,
@@ -460,6 +519,336 @@ def create_food_request(req: ManualFoodRequest, admin: dict = Depends(require_ad
         "source": "admin",
         "message": result.message,
     }
+
+
+@router.post("/kg/requests/batch")
+def batch_food_requests(req: BatchRequestAction, admin: dict = Depends(require_admin)):
+    """批量只做驳回和忽略噪音。不挂别名。"""
+    reason = "noise" if req.action == "ignore_noise" else req.reason
+    updated: list[int] = []
+    with db.connect() as conn:
+        _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
+        cur = conn.cursor()
+        for request_id in req.ids:
+            cur.execute(
+                "UPDATE kg_ingredient_request SET status = 'rejected', reject_reason = %s, "
+                "handled_by = %s, handled_at = now() "
+                "WHERE id = %s RETURNING id",
+                (reason, admin["user_id"], request_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                continue
+            _stop_task(cur, request_id)
+            _log_action(
+                cur, request_id, req.action, admin["user_id"], {"reason": reason},
+            )
+            updated.append(request_id)
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": "登记不存在"},
+        )
+    return {"updated": updated, "reject_reason": reason}
+
+
+@router.get("/kg/requests/{request_id}/matches")
+def match_food_request(request_id: int):
+    """反查并记下结论。列表页只读这三列，不再每次打开都打图。"""
+    from kg.lookup import match
+
+    with db.connect() as conn:
+        _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
+        row = conn.execute(
+            "SELECT food_key FROM kg_ingredient_request WHERE id = %s",
+            (request_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": "登记不存在"},
+        )
+    found = match(row[0])
+    hit_id = next((h["canonical_id"] for h in found["hits"] if h.get("canonical_id")), "")
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE kg_ingredient_request SET triage = %s, triage_hit_id = %s, triage_at = now() "
+            "WHERE id = %s",
+            (found["verdict"], hit_id, request_id),
+        )
+    return found
+
+
+@router.post("/kg/requests/{request_id}/alias")
+def alias_food_request(
+    request_id: int,
+    req: AliasAttach,
+    admin: dict = Depends(require_admin),
+):
+    """把说法挂到已有食材上。占用或敏感词在同一个事务里回滚。"""
+    from kg.normalize import get_alias_store
+    from kg.promote import sync_aliases
+    from kg.sensitive import log_hits, scan
+
+    with db.connect() as conn:
+        _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
+        exists = conn.execute(
+            "SELECT id FROM kg_ingredient_request WHERE id = %s",
+            (request_id,),
+        ).fetchone()
+        if exists is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "not_found", "message": "登记不存在"},
+            )
+        hits = scan(req.alias, field_name="aliases")
+        if any(h.action == "block" for h in hits):
+            log_hits("alias", hits, source="admin")
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "sensitive_blocked", "message": "这个说法不能当别名"},
+            )
+        written = sync_aliases(
+            req.canonical_id, [req.alias], source="admin_request",
+            confidence=1.0, conn=conn,
+        )
+        if not written["written"]:
+            skipped = written["skipped"][0] if written["skipped"] else {}
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "alias_occupied",
+                    "message": "这个说法已经挂在别的食材上",
+                    **skipped,
+                },
+            )
+        conn.execute(
+            "UPDATE kg_ingredient_request SET status = 'approved', "
+            "handled_by = %s, handled_at = now() WHERE id = %s",
+            (admin["user_id"], request_id),
+        )
+        _stop_task(conn, request_id)
+        _log_action(
+            conn, request_id, "alias", admin["user_id"],
+            {"canonical_id": req.canonical_id, "alias": req.alias},
+        )
+    get_alias_store().all_aliases(refresh=True)
+    return {
+        "id": request_id,
+        "status": "approved",
+        "canonical_id": req.canonical_id,
+        "alias": req.alias,
+    }
+
+
+@router.post("/kg/requests/{request_id}/bundle")
+def bundle_food_request(
+    request_id: int,
+    admin: dict = Depends(require_admin),
+    body: dict = Body(...),
+):
+    """按这张登记建一份手工营养素。名称锁定归一名，已有未结的 USDA 产物则拒绝。"""
+    from kg import importer
+    from kg.import_bundle import MANUAL_SOURCE_KEY, _OPEN_STATUS, stage_bundles
+
+    with db.connect() as conn:
+        _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
+        row = conn.execute(
+            "SELECT food_key, status FROM kg_ingredient_request WHERE id = %s",
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "not_found", "message": "登记不存在"},
+            )
+        food_key, status = row
+        if status == "approved":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "already_approved", "message": "已经挂过别名，不必再录一份"},
+            )
+        open_usda = conn.execute(
+            "SELECT id FROM kg_food_bundle "
+            "WHERE food_key = %s AND source_key = 'usda_fdc' AND status = ANY(%s) "
+            "ORDER BY id LIMIT 1",
+            (food_key, list(_OPEN_STATUS)),
+        ).fetchone()
+        if open_usda:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "usda_bundle_open",
+                    "bundle_id": open_usda[0],
+                    "message": f"已有未结的 USDA 记录 #{open_usda[0]}，先处理那一份",
+                },
+            )
+
+        form = dict(body)
+        form["name"] = food_key
+        values = [form.get(col.key, "") for col in importer.COLUMNS]
+        checked = importer.validate_row(2, values, list(importer.COLUMNS))
+        if checked.verdict == "error":
+            errors = [m.as_dict() for m in checked.messages if m.level == "error"]
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "invalid_row",
+                    "message": errors[0]["text"] if errors else "这一行校验不通过",
+                    "errors": errors,
+                },
+            )
+
+        # 已驳回的旧产物还占着 request_id 的唯一约束，腾出来给这份手工记录。
+        conn.execute(
+            "UPDATE kg_food_bundle SET request_id = NULL WHERE request_id = %s",
+            (request_id,),
+        )
+        staged = stage_bundles(
+            [checked], uuid.uuid4(), "request-bundle",
+            source_key=MANUAL_SOURCE_KEY, conn=conn, request_id=request_id,
+        )
+        conn.execute(
+            "UPDATE kg_ingredient_request SET status = 'pending_review', "
+            "handled_by = %s, handled_at = now() WHERE id = %s",
+            (admin["user_id"], request_id),
+        )
+        _stop_task(conn, request_id)
+        _log_action(
+            conn, request_id, "bundle", admin["user_id"],
+            {"bundle_id": staged[0]["bundle_id"] if staged else None},
+        )
+    item = staged[0] if staged else {}
+    return {"id": request_id, "status": "pending_review", **item}
+
+
+@router.post("/kg/requests/{request_id}/fetch")
+def fetch_food_request(request_id: int):
+    """把失败的抓取放回队列并拉起 worker。请求里不跑 process_task。"""
+    with db.connect() as conn:
+        _require_named_table(conn, "kg_ingredient_request", _REQUEST_MISSING)
+        row = conn.execute(
+            "SELECT r.status, t.id, t.status "
+            "FROM kg_ingredient_request r "
+            "LEFT JOIN kg_fetch_task t ON t.request_id = r.id "
+            "WHERE r.id = %s",
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "not_found", "message": "登记不存在"},
+            )
+        req_status, task_id, task_status = row
+        if req_status == "approved":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "already_approved",
+                    "message": "已经挂过别名，再抓会把状态打回待审",
+                },
+            )
+        if req_status != "queued" or task_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "not_queued", "message": "只有还在排队、并且有抓取任务的登记可以立即抓"},
+            )
+        if task_status in ("failed", "rejected"):
+            conn.execute(
+                "UPDATE kg_fetch_task SET status = 'queued', next_retry_at = NULL, "
+                "last_error = '', attempts = 0 WHERE id = %s",
+                (task_id,),
+            )
+        elif task_status != "queued":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "task_busy", "message": "抓取还在进行，或已经完成"},
+            )
+    subprocess.Popen(
+        [sys.executable, "-m", "scripts.run_fetch", "--task-id", str(task_id)],
+        cwd=str(_ROOT),
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return {"task_id": task_id, "status": "queued"}
+
+
+@router.post("/kg/alias-candidates/{candidate_id}/approve")
+def approve_alias_candidate(candidate_id: int, admin: dict = Depends(require_admin)):
+    """确认一条疑似别名。写 dict_alias，不写种子文件。"""
+    from kg.normalize import get_alias_store
+    from kg.promote import sync_aliases
+    from kg.sensitive import log_hits, scan
+
+    with db.connect() as conn:
+        _require_named_table(conn, "dict_alias_candidate", _ALIAS_CANDIDATE_MISSING)
+        row = conn.execute(
+            "SELECT alias, suggested_canonical_id, status, entity_type "
+            "FROM dict_alias_candidate WHERE id = %s",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "not_found", "message": "候选不存在"},
+            )
+        alias, canonical_id, status, entity_type = row
+        if status != "pending":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "not_pending", "message": "这条候选已经处理过"},
+            )
+        if entity_type != "Ingredient" or not canonical_id:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_candidate", "message": "这条候选没有可挂的食材"},
+            )
+        hits = scan(alias, field_name="aliases")
+        if any(h.action == "block" for h in hits):
+            log_hits("alias", hits, source="admin")
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "sensitive_blocked", "message": "这个说法不能当别名"},
+            )
+        written = sync_aliases(
+            canonical_id, [alias], source="admin_candidate",
+            confidence=1.0, conn=conn,
+        )
+        if not written["written"]:
+            skipped = written["skipped"][0] if written["skipped"] else {}
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "alias_occupied",
+                    "message": "这个说法已经挂在别的食材上",
+                    **skipped,
+                },
+            )
+    get_alias_store().all_aliases(refresh=True)
+    return {"id": candidate_id, "status": "approved", "canonical_id": canonical_id}
+
+
+@router.post("/kg/alias-candidates/{candidate_id}/reject")
+def reject_alias_candidate(
+    candidate_id: int,
+    req: RejectRequest,
+    admin: dict = Depends(require_admin),
+):
+    """驳回候选。不写 dict_alias。"""
+    with db.connect() as conn:
+        _require_named_table(conn, "dict_alias_candidate", _ALIAS_CANDIDATE_MISSING)
+        row = conn.execute(
+            "UPDATE dict_alias_candidate SET status = 'rejected' "
+            "WHERE id = %s AND status = 'pending' RETURNING id",
+            (candidate_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": "没有待处理的候选"},
+        )
+    return {"id": candidate_id, "status": "rejected", "reject_reason": req.reason}
 
 
 @router.get("/kg/alias-candidates")

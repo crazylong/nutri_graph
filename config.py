@@ -320,6 +320,8 @@ FDC_DATA_TYPES = os.getenv("FDC_DATA_TYPES", "Foundation,SR Legacy")
 
 # 每日抓取预算（任务数，不是请求数）：超了就不再 claim，防被刷爆
 FOOD_FETCH_DAILY_BUDGET = int(os.getenv("FOOD_FETCH_DAILY_BUDGET", "50"))
+# 未收录反查的模型同义。默认关：种子表和字级模糊够用，模型不进验收。
+TRIAGE_SYNONYM_ENABLED = os.getenv("TRIAGE_SYNONYM_ENABLED", "false").lower() == "true"
 
 # ---- 未收录时的当轮网页参考（v4）----
 # 默认关。打开后，图谱完全对不上的食材问句会同步搜一次公开网页，
