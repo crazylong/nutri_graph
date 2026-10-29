@@ -2,7 +2,7 @@
   <el-container class="shell">
     <el-aside width="200px">
       <div class="brand">食疗管理</div>
-      <el-menu :default-active="route.path" router>
+      <el-menu :default-active="route.path.startsWith('/foods') ? '/foods' : route.path" router>
         <el-menu-item index="/overview">概览</el-menu-item>
         <el-menu-item index="/requests">未收录食物</el-menu-item>
         <el-menu-item index="/bundles">补录审核</el-menu-item>
@@ -10,6 +10,7 @@
         <el-menu-item index="/aliases">疑似别名</el-menu-item>
         <el-menu-item index="/import-new">批量导入</el-menu-item>
         <el-menu-item index="/imports">导入记录</el-menu-item>
+        <el-menu-item index="/foods">食物查询</el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>

@@ -82,6 +82,17 @@ def insert_entity(
     )
 
 
+def delete_entity(canonical_id: str) -> None:
+    """按 canonical_id 删掉 kg_entity 里的向量。集合还没有就什么都不做。"""
+    if not canonical_id or '"' in canonical_id:
+        return
+    client = _get_client()
+    name = config.MILVUS_ENTITY_COLLECTION
+    if not client.has_collection(name):
+        return
+    client.delete(collection_name=name, filter=f'canonical_id == "{canonical_id}"')
+
+
 def insert_chunk(doc_id: str, text: str, embedding: list[float]) -> None:
     _ensure_collection(config.MILVUS_CHUNK_COLLECTION, config.EMBEDDING_DIM, "文档块降级检索")
     client = _get_client()

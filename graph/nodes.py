@@ -110,12 +110,23 @@ def link_node(state: dict) -> dict:
     candidates = extract_candidates(result.residual)
     entities = list(result.entities)
     unresolved: list[str] = []
+    split_terms: list[str] = []
     for term in candidates:
         extra = linker.link(term)
         if extra.entities:
             entities.extend(extra.entities)
-        else:
+            continue
+        parts = _split_unlinked(term, linker)
+        if parts is None:
             unresolved.append(term)
+            continue
+        for part in parts:
+            extra = linker.link(part)
+            if extra.entities:
+                entities.extend(extra.entities)
+            else:
+                unresolved.append(part)
+                split_terms.append(part)
 
     seen: set[tuple[str, str]] = set()
     deduped = []
@@ -130,9 +141,20 @@ def link_node(state: dict) -> dict:
     return {
         "_entities": [e.__dict__ for e in deduped],
         "_unresolved": unresolved,
+        "_split_terms": split_terms,
         "_near_misses": near,
         "_link_residual": result.residual,
     }
+
+
+def _split_unlinked(term: str, linker) -> list[str] | None:
+    """没链上、且够长时才问模型。返回 None 表示保持整段。"""
+    if len(term) < 4:
+        return None
+    from kg.segment import split_compound
+
+    parts = split_compound(term, llm=getattr(linker, "llm", None))
+    return parts or None
 
 
 def _entity_vector_search(query: str, top_k: int = 3) -> list[dict]:
@@ -160,13 +182,22 @@ _SELF_REPORT = (
 
 
 def _eligible_terms(state: dict) -> list[str]:
-    """去掉自述，再取前两个。一句话里最多登记两个，防刷。"""
-    terms = []
+    """去掉自述。普通未识别词最多登记两个，防刷。
+
+    同一次 LLM 从一个残余片段拆出来的词单独放行，最多三个。
+    样例「猪脚天麻当归」要能登记全，又不能把全局上限放开。
+    """
+    split = set(state.get("_split_terms") or [])
+    split_out: list[str] = []
+    other: list[str] = []
     for term in state.get("_unresolved") or []:
         if any(word in (term or "") for word in _SELF_REPORT):
             continue
-        terms.append(term)
-    return terms[:2]
+        if term in split:
+            split_out.append(term)
+        else:
+            other.append(term)
+    return split_out[:3] + other[:2]
 
 
 def _register_unresolved(state: dict) -> list:

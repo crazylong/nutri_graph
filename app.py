@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 import config
 import db
 from api.admin import router as admin_router
+from api.admin_foods import router as admin_foods_router
 from api.admin_import import router as admin_import_router
 from api.auth import router as auth_router
 from api.chat import router as chat_router
@@ -112,7 +113,7 @@ async def _pool_busy_handler(_request, exc: db.PoolBusy):
     )
 
 for _router in (
-    auth_router, admin_router, admin_import_router, chat_router, history_router,
+    auth_router, admin_router, admin_foods_router, admin_import_router, chat_router, history_router,
     kg_router, food_import_router, health_router, system_router,
 ):
     app.include_router(_router)

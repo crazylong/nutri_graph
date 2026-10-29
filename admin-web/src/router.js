@@ -9,6 +9,8 @@ import Candidates from './views/Candidates.vue'
 import Aliases from './views/Aliases.vue'
 import Import from './views/Import.vue'
 import ImportJobs from './views/ImportJobs.vue'
+import Foods from './views/Foods.vue'
+import FoodDetail from './views/FoodDetail.vue'
 import { tokens } from './api'
 
 const router = createRouter({
@@ -28,6 +30,8 @@ const router = createRouter({
         { path: 'aliases', component: Aliases },
         { path: 'import-new', component: Import },
         { path: 'imports', component: ImportJobs },
+        { path: 'foods', component: Foods },
+        { path: 'foods/:cid', component: FoodDetail },
       ],
     },
   ],

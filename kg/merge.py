@@ -44,6 +44,18 @@ REL_LABEL = {
 # 为什么必须白名单：props 来自外部抓取的产物（payload JSONB），
 # 直接 `SET n += $props` 等于让外部数据随意往图里塞属性，
 # 拼错一个键就多一个脏属性，而且很难事后清理。
+# 图上已有节点时，普通导入不能改这些。重录可以改前三个，provenance 永远不改，
+# 否则 rollback 会把这个食材连同搭配、禁忌一起当成「本批新建」删掉。
+_STICKY_PROPS = {"summary", "provenance", "canonical_name", "category"}
+_RERECORD_LOCKED = {"provenance"}
+
+
+def match_props_for_existing(props: dict, *, re_record: bool) -> dict:
+    """已有节点这次允许 SET 的属性。新建节点不走这里，白名单原样写入。"""
+    locked = _RERECORD_LOCKED if re_record else _STICKY_PROPS
+    return {k: v for k, v in props.items() if k not in locked}
+
+
 NODE_PROPS_WHITELIST: dict[str, set[str]] = {
     "Ingredient": {
         "canonical_name", "category", "nature", "aliases", "summary",
@@ -72,7 +84,7 @@ def _fetch_approved_nodes(
     with db.connect() as conn:
         cur = conn.cursor()
         sql = (
-            "SELECT id, batch_id, node_type, canonical_id, name, props "
+            "SELECT id, batch_id, node_type, canonical_id, name, props, re_record "
             "FROM kg_node_candidate WHERE status = 'approved'"
         )
         if batch_ids is not None:
@@ -83,6 +95,25 @@ def _fetch_approved_nodes(
             cur.execute(sql)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _rerecord_ingredient_ids(
+    batch_id: str | None = None, batch_ids: list[str] | None = None
+) -> list[str]:
+    """本批要替换营养边的食材。merge_nodes 已经把候选标成 merged，不能只看 approved。"""
+    with db.connect() as conn:
+        cur = conn.cursor()
+        sql = (
+            "SELECT canonical_id FROM kg_node_candidate "
+            "WHERE node_type = 'Ingredient' AND re_record = true"
+        )
+        if batch_ids is not None:
+            cur.execute(sql + " AND batch_id = ANY(%s)", (batch_ids,))
+        elif batch_id:
+            cur.execute(sql + " AND batch_id = %s", (batch_id,))
+        else:
+            cur.execute(sql + " AND status = 'approved'")
+        return [row[0] for row in cur.fetchall() if row[0]]
 
 
 def _node_text_hits(row: dict) -> list:
@@ -156,15 +187,20 @@ def merge_nodes(
                 if allowed is None:
                     log.warning("未知节点类型，跳过：%s", label)
                     continue
-                payload = [
-                    {
-                        "canonical_id": it["canonical_id"],
-                        "props": {
-                            k: v for k, v in (it["props"] or {}).items() if k in allowed
-                        },
+                payload = []
+                for it in items:
+                    props = {
+                        k: v for k, v in (it["props"] or {}).items() if k in allowed
                     }
-                    for it in items
-                ]
+                    payload.append({
+                        "canonical_id": it["canonical_id"],
+                        "create_props": props,
+                        "match_props": (
+                            match_props_for_existing(props, re_record=bool(it.get("re_record")))
+                            if label == "Ingredient"
+                            else props
+                        ),
+                    })
                 # label 不能参数化，只能拼串 —— 所以上面必须用白名单卡住
                 #
                 # .consume() 不能省：s.run() 返回的是**惰性结果**，auto-commit 的
@@ -172,10 +208,14 @@ def merge_nodes(
                 # RESET 会把这笔还没提交的写**回滚掉**，而 PG 侧照样把候选标成
                 # merged —— 于是「库里 1331 个食材都是 merged，图里只有 888 个」，
                 # 479 个食材连同营养边一起消失，还查不出错（2026-10-28 修）。
+                #
+                # ON CREATE 写全量；ON MATCH 按重录标记裁掉粘性字段。
+                # 种子没有候选行，第一次普通导入如果走 SET n += props，会把图上的名称改掉。
                 s.run(
                     f"UNWIND $rows AS row "
                     f"MERGE (n:`{label}` {{canonical_id: row.canonical_id}}) "
-                    f"SET n += row.props",
+                    f"ON CREATE SET n += row.create_props "
+                    f"ON MATCH SET n += row.match_props",
                     rows=payload,
                 ).consume()
                 merged_ids.extend(it["id"] for it in items)
@@ -227,9 +267,11 @@ def merge(
     """把 approved 边候选 MERGE 进主图，返回合并数量。
 
     只处理边。节点请先跑 merge_nodes —— promote 里就是「先节点后边」。
+    重录批次会先删掉这些食材的 CONTAINS_NUTRIENT，再写本批新边，两步在同一个事务里。
     """
+    rerecord_ids = _rerecord_ingredient_ids(batch_id, batch_ids)
     rows = _fetch_approved(batch_id, batch_ids)
-    if not rows:
+    if not rows and not rerecord_ids:
         log.info("没有待合并的 approved 候选")
         return 0
 
@@ -268,55 +310,59 @@ def merge(
     merged_ids = []
     try:
         with driver.session() as s:
-            # 逐条 MERGE（演示规模；生产可改为按 rel 分组后 UNWIND 批量）
-            # 这里保持单 session 串行执行，天然避免并发竞态
-            for r in valid:
-                rel = r["rel"]
-                if rel not in REL_LABEL:
-                    log.warning("未知关系类型，跳过：%s", rel)
-                    continue
-                rk = relation_key(r["src_id"], rel, r["dst_id"])
-                # amount / unit 只有营养边才有值。为 None 时不写这两句 ——
-                # Cypher 里 SET r.x = null 等于**删掉属性**，会把别的来源
-                # 早先写好的数值抹掉（MERGE 命中已有边时尤其危险）。
-                amount = r.get("amount")
-                numeric = (
-                    f"r.amount = $amount, r.unit = $unit, " if amount is not None else ""
-                )
-                cypher = (
-                    f"MATCH (a {{canonical_id: $src_id}}) "
-                    f"MATCH (b {{canonical_id: $dst_id}}) "
-                    f"MERGE (a)-[r:{rel} {{relation_key: $relation_key}}]->(b) "
-                    f"SET r.evidence_type = $evidence_type, "
-                    f"r.evidence_level = $evidence_level, "
-                    f"r.claim_text = $claim_text, "
-                    f"r.sources = $sources, "
-                    f"r.confidence = $confidence, "
-                    f"r.source_locator = $source_locator, "
-                    f"r.source_count = $source_count, "
-                    f"r.provisional = $provisional, "
-                    f"{numeric}"
-                    f"r.batch_id = $batch_id, "
-                    f"r.review_status = 'merged'"
-                )
-                s.run(
-                    cypher,
-                    src_id=r["src_id"],
-                    dst_id=r["dst_id"],
-                    relation_key=rk,
-                    evidence_type=r["evidence_type"],
-                    evidence_level=r["evidence_level"],
-                    claim_text=r["claim_text"],
-                    sources=sources_to_json(r["sources"]),
-                    confidence=float(r["confidence"] or 0.0),
-                    source_locator=r.get("source_locator") or "",
-                    source_count=int(r.get("source_count") or 0),
-                    provisional=bool(r.get("provisional")),
-                    amount=amount,
-                    unit=r.get("unit") or "",
-                    batch_id=r["batch_id"],
-                ).consume()
-                merged_ids.append(r["id"])
+            with s.begin_transaction() as tx:
+                if rerecord_ids:
+                    tx.run(
+                        "UNWIND $cids AS cid "
+                        "MATCH (:Ingredient {canonical_id: cid})-[r:CONTAINS_NUTRIENT]->() "
+                        "DELETE r",
+                        cids=rerecord_ids,
+                    ).consume()
+                for r in valid:
+                    rel = r["rel"]
+                    if rel not in REL_LABEL:
+                        log.warning("未知关系类型，跳过：%s", rel)
+                        continue
+                    rk = relation_key(r["src_id"], rel, r["dst_id"])
+                    amount = r.get("amount")
+                    numeric = (
+                        f"r.amount = $amount, r.unit = $unit, " if amount is not None else ""
+                    )
+                    cypher = (
+                        f"MATCH (a {{canonical_id: $src_id}}) "
+                        f"MATCH (b {{canonical_id: $dst_id}}) "
+                        f"MERGE (a)-[r:{rel} {{relation_key: $relation_key}}]->(b) "
+                        f"SET r.evidence_type = $evidence_type, "
+                        f"r.evidence_level = $evidence_level, "
+                        f"r.claim_text = $claim_text, "
+                        f"r.sources = $sources, "
+                        f"r.confidence = $confidence, "
+                        f"r.source_locator = $source_locator, "
+                        f"r.source_count = $source_count, "
+                        f"r.provisional = $provisional, "
+                        f"{numeric}"
+                        f"r.batch_id = $batch_id, "
+                        f"r.review_status = 'merged'"
+                    )
+                    tx.run(
+                        cypher,
+                        src_id=r["src_id"],
+                        dst_id=r["dst_id"],
+                        relation_key=rk,
+                        evidence_type=r["evidence_type"],
+                        evidence_level=r["evidence_level"],
+                        claim_text=r["claim_text"],
+                        sources=sources_to_json(r["sources"]),
+                        confidence=float(r["confidence"] or 0.0),
+                        source_locator=r.get("source_locator") or "",
+                        source_count=int(r.get("source_count") or 0),
+                        provisional=bool(r.get("provisional")),
+                        amount=amount,
+                        unit=r.get("unit") or "",
+                        batch_id=r["batch_id"],
+                    ).consume()
+                    merged_ids.append(r["id"])
+                tx.commit()
     finally:
         driver.close()
 

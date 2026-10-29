@@ -197,6 +197,7 @@ def _upsert_ingredient_candidate(
     aliases: list[str],
     bundle_id: int,
     reviewer: str,
+    re_record: bool = False,
 ) -> None:
     """写 Ingredient 节点候选。**已存在时是合并，不是覆盖。**
 
@@ -227,12 +228,13 @@ def _upsert_ingredient_candidate(
             """
             INSERT INTO kg_node_candidate
                 (batch_id, node_type, canonical_id, name, props, aliases, bundle_id,
-                 status, reviewer, reviewed_at)
-            VALUES (%s, 'Ingredient', %s, %s, %s, %s, %s, 'approved', %s, now())
+                 status, reviewer, reviewed_at, re_record)
+            VALUES (%s, 'Ingredient', %s, %s, %s, %s, %s, 'approved', %s, now(), %s)
             """,
             (
                 batch_id, cid, name,
                 psycopg.types.json.Jsonb(props), aliases, bundle_id, reviewer,
+                re_record,
             ),
         )
         return
@@ -241,6 +243,15 @@ def _upsert_ingredient_candidate(
     merged = dict(old_props)
     for k, v in props.items():
         if k in _STICKY_PROPS:
+            # provenance 永远不改：重录改了它，rollback 会把搭配和禁忌一起删掉。
+            if k == "provenance":
+                if old_props.get(k) in (None, "", [], {}):
+                    if v not in (None, "", [], {}):
+                        merged[k] = v
+                continue
+            if re_record and v not in (None, "", [], {}):
+                merged[k] = v
+                continue
             # 旧值非空就以旧值为准；旧值为空才补
             if old_props.get(k) in (None, "", [], {}):
                 if v not in (None, "", [], {}):
@@ -258,11 +269,12 @@ def _upsert_ingredient_candidate(
 
     conn.execute(
         "UPDATE kg_node_candidate SET props = %s, aliases = %s, batch_id = %s, "
-        "  bundle_id = %s, status = 'approved', reviewer = %s, reviewed_at = now() "
+        "  bundle_id = %s, status = 'approved', reviewer = %s, reviewed_at = now(), "
+        "  re_record = %s "
         "WHERE canonical_id = %s AND node_type = 'Ingredient'",
         (
             psycopg.types.json.Jsonb(merged), merged_aliases, batch_id,
-            bundle_id, reviewer, cid,
+            bundle_id, reviewer, re_record, cid,
         ),
     )
 
@@ -296,7 +308,8 @@ def approve_bundle(
         row = conn.execute(
             "SELECT food_key, canonical_name, english_name, scientific_name, category, "
             "       nature, source_desc, external_id, score_total, source_count, sources, "
-            "       hard_veto, status, request_id, aliases, evidence_type, source_key "
+            "       hard_veto, status, request_id, aliases, evidence_type, source_key, "
+            "       re_record, canonical_id "
             "FROM kg_food_bundle WHERE id = %s FOR UPDATE",
             (bundle_id,),
         ).fetchone()
@@ -307,7 +320,9 @@ def approve_bundle(
             food_key, canonical_name, english_name, scientific_name, category,
             nature, source_desc, external_id, score_total, source_count, sources,
             hard_veto, status, request_id, bundle_aliases, evidence_type, source_key,
+            re_record, stored_cid,
         ) = row
+        re_record = bool(re_record)
 
         if status in ("rejected", "merged"):
             raise PromoteError(f"bundle 当前状态为 {status}，不能再通过")
@@ -363,9 +378,12 @@ def approve_bundle(
 
         # 别名也参与身份判定：导入表里写「北豆腐」，别名有「老豆腐」，
         # 若「老豆腐」已经挂在既有节点上，就该挂过去，而不是再建一个。
-        cid, basis = _resolve_canonical_id(
-            conn, [name, food_key, *(bundle_aliases or [])]
-        )
+        if re_record and stored_cid:
+            cid, basis = stored_cid, "rerecord"
+        else:
+            cid, basis = _resolve_canonical_id(
+                conn, [name, food_key, *(bundle_aliases or [])]
+            )
         # 「过了人工审核」和「数值被交叉验证过」是两件事：
         # 前者解决「这是不是那个东西」，后者解决「这个数对不对」。
         # 只有单一来源时，内容可信但数值未经交叉验证 → 标 provisional，检索降级引用。
@@ -405,6 +423,7 @@ def approve_bundle(
             aliases=aliases,
             bundle_id=bundle_id,
             reviewer=reviewer,
+            re_record=re_record,
         )
 
         # ---------- 边候选 ----------

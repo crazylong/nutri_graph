@@ -17,6 +17,8 @@ import io
 
 import pytest
 
+pytestmark = pytest.mark.no_db
+
 from kg import importer
 
 

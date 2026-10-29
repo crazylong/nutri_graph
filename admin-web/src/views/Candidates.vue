@@ -22,10 +22,10 @@
           <span v-else>—</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="160">
+      <el-table-column v-if="showActions" label="操作" width="160">
         <template #default="{ row }">
-          <el-button link :disabled="row.sensitive_block > 0" @click="act(row, 'approve')">通过</el-button>
-          <el-button link type="danger" @click="act(row, 'reject')">驳回</el-button>
+          <el-button v-if="status === 'pending'" link :disabled="row.sensitive_block > 0" @click="act(row, 'approve')">通过</el-button>
+          <el-button v-if="status === 'pending' || status === 'approved'" link type="danger" @click="act(row, 'reject')">驳回</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -33,12 +33,13 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errorMessage, readJson } from '../api'
 
 const statuses = ['pending', 'approved', 'rejected', 'merged']
 const status = ref('pending')
+const showActions = computed(() => status.value === 'pending' || status.value === 'approved')
 const items = ref([])
 const loading = ref(false)
 
