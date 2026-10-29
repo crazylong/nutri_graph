@@ -85,6 +85,7 @@ def chat(payload: dict, who: dict | None = Depends(get_principal)):
                 graph_hit=result.get("_graph_hit", False),
                 degraded=result.get("_degraded", False),
                 elapsed_ms=elapsed_ms,
+                web_used=bool((result.get("_web_answer") or {}).get("used")),
             )
         # 先记回答再打码。倒过来的话 record_result 会把刚写的占位盖回原文。
         # kind=guard 时 output 留下就医回答；缺省则 input 和 output 都是占位。
@@ -112,6 +113,7 @@ def chat(payload: dict, who: dict | None = Depends(get_principal)):
         # 未收录时把登记结果结构化带出去：前端要显示编号和进度，
         # 不能让人从「已记录（编号 #170）」这句话里正则抠数字。
         "food_requests": result.get("_food_requests", []),
+        "web_answer": result.get("_web_answer") or {"used": False, "sources": [], "blocked": ""},
         "session_id": result.get("session_id") or session_id,
         "disclaimer": config.DISCLAIMER,
     }

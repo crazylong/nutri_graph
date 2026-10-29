@@ -2,13 +2,15 @@
 graph/workflow.py —— LangGraph 工作流组装
 
 流程：
-  START → guard → normalize → link → route
+  START → guard → sensitive_guard → normalize → link → route
     ├─ graph_query → route_after_graph
     │      ├─ assemble → generate → memory_write → END
     │      └─ vector_fallback → assemble → ...
+    ├─ web_answer → memory_write → END
+    ├─ uncatalogued → memory_write → END
     └─ vector_fallback → assemble → generate → memory_write → END
 
-guard 命中红旗症状 → 直接 END（短路）
+guard 命中红旗症状、sensitive_guard 命中政治类，都跳过检索，仍落记忆。
 在线断言级接地还没做，所以不再挂一个空的 verify 节点。
 """
 from __future__ import annotations
@@ -19,7 +21,7 @@ from graph.state import RAGState
 from graph.nodes import (
     guard_node, normalize_node, link_node, route_node,
     graph_query_node, vector_fallback_node, assemble_node,
-    generate_node, memory_write_node, uncatalogued_node,
+    generate_node, memory_write_node, uncatalogued_node, web_answer_node,
     sensitive_guard_node, route_after_sensitive,
     route_after_link, route_after_graph,
 )
@@ -43,6 +45,7 @@ def build_workflow() -> StateGraph:
     wf.add_node("graph_query", graph_query_node)
     wf.add_node("vector_fallback", vector_fallback_node)
     wf.add_node("uncatalogued", uncatalogued_node)
+    wf.add_node("web_answer", web_answer_node)
     wf.add_node("assemble", assemble_node)
     wf.add_node("generate", generate_node)
     wf.add_node("memory_write", memory_write_node)
@@ -65,12 +68,14 @@ def build_workflow() -> StateGraph:
     wf.add_edge("link", "route")
     wf.add_conditional_edges("route", route_after_link, {
         "graph_query": "graph_query",
+        "web_answer": "web_answer",
         "uncatalogued": "uncatalogued",
         "vector_fallback": "vector_fallback",
     })
 
-    # 未收录：回答是确定性的，不经过生成，直接落记忆后结束
+    # 未收录和网页参考：回答已经写好，不经过图谱生成，直接落记忆后结束
     wf.add_edge("uncatalogued", "memory_write")
+    wf.add_edge("web_answer", "memory_write")
 
     wf.add_conditional_edges("graph_query", route_after_graph, {
         "assemble": "assemble",

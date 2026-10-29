@@ -2,7 +2,8 @@
 graph/nodes.py —— LangGraph 节点实现
 
 节点链：
-  guard → normalize → link → route → graph_query / vector_fallback → assemble → generate → memory_write
+  guard → sensitive_guard → normalize → link → route
+    → graph_query / web_answer / uncatalogued / vector_fallback → … → memory_write
 """
 from __future__ import annotations
 
@@ -151,55 +152,119 @@ def _entity_vector_search(query: str, top_k: int = 3) -> list[dict]:
         return []
 
 
+# 健康自述。不要用整份画像线索：里面的「斤 / 岁」会把「二斤猪肉」整段丢掉。
+_SELF_REPORT = (
+    "怀孕", "哺乳", "孕妇", "痛风", "糖尿", "高血压", "低血压",
+    "肾病", "过敏", "忌口", "忌食", "慢病", "失眠", "生理期", "月经",
+)
+
+
+def _eligible_terms(state: dict) -> list[str]:
+    """去掉自述，再取前两个。一句话里最多登记两个，防刷。"""
+    terms = []
+    for term in state.get("_unresolved") or []:
+        if any(word in (term or "") for word in _SELF_REPORT):
+            continue
+        terms.append(term)
+    return terms[:2]
+
+
+def _register_unresolved(state: dict) -> list:
+    """登记这一轮该记的食材。网页回落和未收录出口都走这里，避免登记两次。"""
+    from kg.request import register
+
+    who = state.get("user_id", "anonymous")
+    near = state.get("_near_misses") or []
+    results = []
+    for term in _eligible_terms(state):
+        term_near = [n for n in near if n.get("mention") == term]
+        results.append(register(term, who=who, source="chat", near_misses=term_near))
+    return results
+
+
+def _visible_requests(results) -> list:
+    # 敏感词命中：不回显。register() 拒绝写入只挡住了写库，
+    # gaps 和 _food_requests 若仍用 r.term 拼，原词会回到前端。
+    return [
+        item for item in results
+        if not (item.action == "rejected_not_food" and item.code == "sensitive")
+    ]
+
+
+def _food_payload(results) -> list[dict]:
+    return [
+        {
+            "term": item.term,
+            "food_key": item.food_key,
+            "action": item.action,
+            "request_id": item.request_id,
+            "status": item.status,
+            "hit_count": item.hit_count,
+        }
+        for item in _visible_requests(results)
+    ]
+
+
+def _uncatalogued_message(results) -> str:
+    if not results:
+        return "这个词我暂时没能对应到具体的食材。能说得再具体一点吗，比如「黑豆」？"
+    return "\n".join(item.message for item in results)
+
+
 # ============================================================
 # uncatalogued —— 未收录食材：登记 + 明确回话
 # ============================================================
 def uncatalogued_node(state: dict) -> dict:
-    """图谱里没有这个食材时的出口。
+    """图谱里没有这个食材、也不该去搜网页时的出口。
 
     为什么不走 generate：这里没有图事实可依据，让模型自由发挥正是要避免的事。
-    回答是确定性的，而且必须同时做到三件事 ——
-      ① 明说暂未收录（不能装懂）
-      ② 不给营养数据 / 搭配建议（不能编造）
-      ③ 给出可执行的下一步（已登记、编号、大约多久）
+    回答明说暂未收录，给出登记编号，不承诺审核后就能查到。
     """
-    from kg.request import register
-
-    who = state.get("user_id", "anonymous")
-    terms = (state.get("_unresolved") or [])[:2]   # 一句话里最多登记两个，防刷
-    near = state.get("_near_misses") or []
-
-    results = []
-    for term in terms:
-        term_near = [n for n in near if n.get("mention") == term]
-        results.append(register(term, who=who, source="chat", near_misses=term_near))
-
-    if not results:
-        answer = "这个词我暂时没能对应到具体的食材。能说得再具体一点吗，比如「黑豆」？"
-    else:
-        answer = "\n".join(r.message for r in results)
-
-    # 敏感词命中：不回显。
-    # register() 拒绝写入只挡住了"写库"这一半 —— gaps 和 _food_requests 是用
-    # r.term 拼的，原词照样会回显给前端。所以这里要把这批结果整个摘掉。
-    visible = [
-        r for r in results
-        if not (r.action == "rejected_not_food" and r.code == "sensitive")
-    ]
-
+    results = _register_unresolved(state)
+    visible = _visible_requests(results)
     return {
-        "answer": answer,
+        "answer": _uncatalogued_message(results),
         "basis": [],
-        "gaps": [f"图谱未收录：{r.food_key or r.term}" for r in visible] or ["未能识别食材"],
+        "gaps": [f"图谱未收录：{item.food_key or item.term}" for item in visible] or ["未能识别食材"],
         "confidence": 0.0,
         "_graph_hit": False,
         "_degraded": False,
-        "_food_requests": [
-            {"term": r.term, "food_key": r.food_key, "action": r.action,
-             "request_id": r.request_id, "status": r.status, "hit_count": r.hit_count}
-            for r in visible
-        ],
+        "_food_requests": _food_payload(results),
+        "_web_answer": {"used": False, "sources": [], "blocked": ""},
     }
+
+
+def web_answer_node(state: dict) -> dict:
+    """当轮网页参考。登记在 kg.webanswer.answer 里做一次；失败时不重复登记。"""
+    try:
+        from kg.webanswer import answer
+
+        return answer(state)
+    except Exception as exc:  # noqa: BLE001 —— 搜网页失败也不能让 /chat 500
+        log.warning("网页参考失败，改走未收录话术：%s", exc)
+        if state.get("_registered_this_turn"):
+            return {
+                "answer": "这些食材还没进知识库。",
+                "basis": [],
+                "gaps": ["图谱未收录"],
+                "confidence": 0.0,
+                "_graph_hit": False,
+                "_degraded": False,
+                "_food_requests": state.get("_food_requests") or [],
+                "_web_answer": {"used": False, "sources": [], "blocked": "error"},
+            }
+        results = _register_unresolved(state)
+        visible = _visible_requests(results)
+        return {
+            "answer": _uncatalogued_message(results),
+            "basis": [],
+            "gaps": [f"图谱未收录：{item.food_key or item.term}" for item in visible] or ["未能识别食材"],
+            "confidence": 0.0,
+            "_graph_hit": False,
+            "_degraded": False,
+            "_food_requests": _food_payload(results),
+            "_web_answer": {"used": False, "sources": [], "blocked": "error"},
+        }
 
 
 # ============================================================
@@ -241,8 +306,9 @@ def route_after_link(state: dict) -> str:
     """有能落地的 (意图, 节点) 才走图。
 
     食材问法要有 Ingredient，症状问法要有 Symptom。
-    对得上 → graph_query
-    对不上、但有未收录词 → uncatalogued
+    对得上 → graph_query（哪怕还有别的词没对上，也不改去搜网页）
+    一个都对不上、开关开着、问法允许 → web_answer
+    对不上、但不该搜 → uncatalogued
     其余 → vector_fallback
     """
     entities = state.get("_entities") or []
@@ -250,6 +316,10 @@ def route_after_link(state: dict) -> str:
     if plan_queries(entities, intents):
         return "graph_query"
     if state.get("_unresolved"):
+        from kg.webanswer import allowed
+
+        if allowed(state):
+            return "web_answer"
         return "uncatalogued"
     return "vector_fallback"
 
@@ -594,6 +664,7 @@ def answer_card(state: dict) -> dict:
         "subgraph": build_subgraph(state.get("_entities") or [], results),
         "basis": state.get("basis") or [],
         "food_requests": state.get("_food_requests") or [],
+        "web_answer": state.get("_web_answer") or {"used": False, "sources": [], "blocked": ""},
         "disclaimer": config.DISCLAIMER,
     }
 
@@ -663,6 +734,7 @@ def memory_write_node(state: dict) -> dict:
             and state.get("consent_profile", True)
             and config.DASHSCOPE_API_KEY
             and mentions_health_constraint(question)
+            and not (state.get("_web_answer") or {}).get("used")
         ):
             _defer_profile(user_id, question, state.get("answer", ""))
 

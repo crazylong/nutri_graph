@@ -827,6 +827,16 @@ function escapeHtml(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+function safeHttpUrl(url) {
+  try {
+    const parsed = new URL(url, location.origin);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+    return parsed.href;
+  } catch {
+    return '';
+  }
+}
+
 function renderAnswer(body) {
   const wrap = el('div', 'a');
   const card = el('div', 'card');
@@ -834,13 +844,15 @@ function renderAnswer(body) {
 
   const counts = body.evidence_counts || {};
   const levels = Object.keys(counts).filter((k) => counts[k] > 0).sort();
-  if (levels.length || body.graph_hit === false) {
+  const web = body.web_answer || {};
+  if (levels.length || body.graph_hit === false || web.used) {
     const meta = el('div', 'meta');
     levels.forEach((lv) => {
       meta.appendChild(el('span', `chip lv-${lv}`,
         `${lv} 级 · ${LEVEL_LABEL[lv] || ''} ${counts[lv]} 条`));
     });
     if (body.graph_hit === false) meta.appendChild(el('span', 'chip ghost', '未走图谱'));
+    if (web.used) meta.appendChild(el('span', 'chip web', '网络参考'));
     if ((body.answer || '').includes('单一来源')) {
       meta.appendChild(el('span', 'chip flag', '单一来源补录'));
     }
@@ -868,13 +880,39 @@ function renderAnswer(body) {
 
   const reqs = body.food_requests || [];
   if (reqs.length) {
-    const r = reqs[0];
-    const n = el('div', 'notice');
-    n.innerHTML =
-      `<b>「${escapeHtml(r.food_key || r.term)}」已登记</b>　编号 #${r.request_id}` +
-      `　状态 ${escapeHtml(r.status || '')}` +
-      `<br>审核通过后就能查到它的营养数据与搭配建议。在这之前我不会给出未核实的内容。`;
+    const n = el('div', 'notice warn');
+    const parts = reqs.map((r) => {
+      const name = r.food_key || r.term || '';
+      const id = r.request_id ? `#${r.request_id}` : '';
+      return [name, id].filter(Boolean).join(' ');
+    }).filter(Boolean);
+    n.textContent = parts.length ? `已登记 ${parts.join(' / ')}` : '已登记';
     card.appendChild(n);
+  }
+
+  const sources = (web.sources || []).filter((s) => s && (s.title || s.url));
+  if (web.used && sources.length) {
+    const d = el('details', 'src-list');
+    d.appendChild(el('summary', null, `参考来源 ${sources.length} 个`));
+    const ul = el('ul');
+    sources.forEach((s) => {
+      const li = el('li');
+      const href = safeHttpUrl(s.url);
+      if (href) {
+        const a = document.createElement('a');
+        a.href = href;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = s.title || s.site || href;
+        li.appendChild(a);
+      } else {
+        li.appendChild(document.createTextNode(s.title || '网页'));
+      }
+      if (s.site) li.appendChild(el('span', 'src-host', s.site));
+      ul.appendChild(li);
+    });
+    d.appendChild(ul);
+    card.appendChild(d);
   }
 
   if (body.disclaimer) card.appendChild(el('p', 'disclaimer', body.disclaimer));

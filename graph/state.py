@@ -22,6 +22,9 @@ class RAGState(TypedDict, total=False):
     _near_misses: list[dict[str, Any]]    # 未收录词的近似候选（「你是不是想问黑豆？」）
     _link_residual: str                   # 没被任何别名占用的原文片段
     _food_requests: list[dict[str, Any]]  # 未收录食材的登记结果
+    # 当轮网页参考。必须声明，否则 LangGraph 会把这个键丢掉，
+    # /chat 和历史卡片都看不到来源。
+    _web_answer: dict[str, Any]
 
     # 意图与检索
     _intents: list[str]

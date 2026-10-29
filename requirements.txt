@@ -39,6 +39,9 @@ langchain-text-splitters>=1.1.3,<2.0.0
 
 # Embedding / LLM (DashScope)
 dashscope>=2.0.1,<3.0.0
+# 智谱网页搜索。`from zai import ZhipuAiClient` 属于这个包。
+# 不要装 zai==0.0.2，那是另一个包。
+zai-sdk>=0.2.2,<0.3.0
 
 # Observability
 langfuse>=3.0.0,<4.0.0

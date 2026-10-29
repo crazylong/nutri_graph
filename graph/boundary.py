@@ -125,6 +125,39 @@ def build_document_prompt(
     )
 
 
+def build_web_prompt(
+    question: str,
+    snippets: list[dict[str, Any]],
+    herbal: bool = False,
+) -> str:
+    """未收录食材的网页参考。不接收画像，避免把过敏和慢病交给第三方上下文。"""
+    lines = []
+    for snippet in snippets:
+        site = snippet.get("site") or "网页"
+        title = snippet.get("title") or ""
+        content = snippet.get("content") or ""
+        lines.append(f"[{site}] {title}\n{content}")
+    herbal_note = ""
+    if herbal:
+        herbal_note = (
+            "问题里出现了药材。不要给出剂量、疗程、功效，也不要下「适合什么人」的结论，"
+            "只转述做法和片段里写明的注意事项。\n"
+        )
+    ctx = "\n".join(lines)
+    return (
+        "你是食疗养生助手。下面是公开网页片段，不是知识图谱里的事实。\n"
+        "只能转述这些片段里写明的内容，禁止补充常识或图外知识。\n"
+        "禁止给出功效、疗效、治疗、剂量、疗程或人群禁忌的确定结论。\n"
+        "片段互相矛盾时，直接写「说法不一」，不要选边。\n"
+        "不得声称这些内容经过审核、权威或来自知识库。\n"
+        f"{herbal_note}"
+        f"网页片段：\n{ctx}\n\n"
+        f"用户问题：{question}\n\n"
+        '请以 JSON 返回：{"answer":"...","cited":["用到的站点"],"confidence":0到0.25}\n'
+        "confidence 必须在 0 到 0.25 之间。"
+    )
+
+
 # 用户原话里出现这些，才可能是在透露自己的情况。
 # 没有就不要再打一次模型：搭配、营养这类问法占了绝大多数请求。
 # 不用「男 / 女 / 喜欢」：会打中「男人补锌」「我喜欢吃番茄」，而且后句不一定是在说自己。

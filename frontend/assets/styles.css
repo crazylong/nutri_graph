@@ -253,6 +253,23 @@ details.basis li { font-size: 13px; color: var(--ink-2); margin: 3px 0; }
   color: #7a5216;
 }
 .notice b { font-weight: 600; }
+.notice.warn { background: var(--warn-weak); }
+
+.src-list { margin-top: 12px; }
+.src-list summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-2);
+  list-style: none;
+  user-select: none;
+}
+.src-list summary::-webkit-details-marker { display: none; }
+.src-list summary::before { content: "▸ "; color: var(--ink-3); }
+.src-list[open] summary::before { content: "▾ "; }
+.src-list ul { margin: 8px 0 0; padding-left: 18px; }
+.src-list li { font-size: 13px; color: var(--ink-2); margin: 3px 0; }
+.src-host { margin-left: 8px; color: var(--ink-3); font-size: 12px; }
+.chip.web { border-color: #ecd8b6; background: var(--warn-weak); color: #8a5a1c; }
 
 .disclaimer { margin: 12px 0 0; font-size: 12px; color: var(--ink-3); }
 

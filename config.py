@@ -320,6 +320,31 @@ FDC_DATA_TYPES = os.getenv("FDC_DATA_TYPES", "Foundation,SR Legacy")
 
 # 每日抓取预算（任务数，不是请求数）：超了就不再 claim，防被刷爆
 FOOD_FETCH_DAILY_BUDGET = int(os.getenv("FOOD_FETCH_DAILY_BUDGET", "50"))
+
+# ---- 未收录时的当轮网页参考（v4）----
+# 默认关。打开后，图谱完全对不上的食材问句会同步搜一次公开网页，
+# 结果只作临时回答，不写图谱、不写 bundle。
+WEB_SEARCH_PROVIDER = os.getenv("WEB_SEARCH_PROVIDER", "zhipu_sogou")
+WEB_SEARCH_ENABLED = os.getenv("WEB_SEARCH_ENABLED", "false").lower() == "true"
+WEB_SEARCH_API_KEY = os.getenv("WEB_SEARCH_API_KEY") or os.getenv("ZHIPU_API_KEY", "")
+WEB_SEARCH_TOP_K = int(os.getenv("WEB_SEARCH_TOP_K", "3"))
+WEB_SEARCH_TIMEOUT_S = float(os.getenv("WEB_SEARCH_TIMEOUT_S", "3"))
+WEB_ANSWER_BUDGET_MS = int(os.getenv("WEB_ANSWER_BUDGET_MS", "8000"))
+WEB_ANSWER_DAILY_BUDGET = int(os.getenv("WEB_ANSWER_DAILY_BUDGET", "200"))
+WEB_ANSWER_USER_HOURLY = int(os.getenv("WEB_ANSWER_USER_HOURLY", "5"))
+WEB_ANSWER_CACHE_TTL_H = int(os.getenv("WEB_ANSWER_CACHE_TTL_H", "168"))
+WEB_ANSWER_NEGATIVE_TTL_H = 24
+WEB_ANSWER_MAX_QUESTION = int(os.getenv("WEB_ANSWER_MAX_QUESTION", "60"))
+WEB_ANSWER_INTENTS = tuple(
+    part.strip()
+    for part in os.getenv(
+        "WEB_ANSWER_INTENTS", "pair,incompatible,nutrition,substitute"
+    ).split(",")
+    if part.strip()
+)
+# 只卡搜索回来的原始片段。裁完剩下的句子再短也留。
+WEB_ANSWER_MIN_CHARS = int(os.getenv("WEB_ANSWER_MIN_CHARS", "40"))
+WEB_ANSWER_PROMPT_VERSION = os.getenv("WEB_ANSWER_PROMPT_VERSION", "v1")
 # 自动通过的门槛。单源一致性恒为 0.6 → 得分封顶 0.88，所以现在永远进人工；
 # 等接入第二个来源（中国食物成分表离线导入）才可能真正自动通过。
 FOOD_AUTO_APPROVE_MIN_SCORE = float(os.getenv("FOOD_AUTO_APPROVE_MIN_SCORE", "0.9"))

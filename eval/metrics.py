@@ -90,7 +90,7 @@ class UncataloguedHandling(SingleTurnMetric):
     # ① 承认未收录
     _ACK_MARKERS = [
         "暂未收录", "尚未收录", "没有收录", "未收录", "知识库中没有",
-        "知识库里没有", "已记录", "已反馈", "已提交",
+        "知识库里没有", "已记录", "已登记", "已反馈", "已提交",
     ]
     # ② 编造营养数值：出现「数字 + 营养单位」即判失败
     _NUTRIENT_RE = re.compile(

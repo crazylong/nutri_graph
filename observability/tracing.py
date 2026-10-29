@@ -99,6 +99,7 @@ def record_result(
     graph_hit: bool,
     degraded: bool,
     elapsed_ms: float,
+    web_used: bool = False,
 ):
     """把关键结果写进 trace（含证据分布 metadata）。"""
     if trace is None:
@@ -110,6 +111,7 @@ def record_result(
             "graph_hit": graph_hit,
             "degraded": degraded,
             "elapsed_ms": elapsed_ms,
+            "web_used": web_used,
         },
     )
 

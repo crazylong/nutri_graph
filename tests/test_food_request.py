@@ -134,7 +134,7 @@ def test_new_request_is_idempotent(client):
     assert first.action == "new_request"
     assert first.request_id is not None
     assert first.hit_count == 1
-    assert "暂未收录" in first.message and "已记录" in first.message
+    assert "暂未收录" in first.message and "已登记" in first.message
 
     again = register(UNSEEN, who="u-test")
     assert again.action == "duplicated"
