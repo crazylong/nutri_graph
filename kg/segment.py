@@ -7,7 +7,7 @@ import threading
 
 log = logging.getLogger("kg.segment")
 
-SPLIT_TIMEOUT_SEC = 3
+SPLIT_TIMEOUT_SEC = 8
 
 
 def keep_substrings(fragment: str, terms: list[str], limit: int = 4) -> list[str]:

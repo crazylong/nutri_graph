@@ -5,6 +5,7 @@ graph/workflow.py —— LangGraph 工作流组装
   START → guard → sensitive_guard → normalize → link → route
     ├─ graph_query → route_after_graph
     │      ├─ assemble → generate → memory_write → END
+    │      ├─ web_answer → memory_write → END
     │      └─ vector_fallback → assemble → ...
     ├─ web_answer → memory_write → END
     ├─ uncatalogued → memory_write → END
@@ -79,6 +80,7 @@ def build_workflow() -> StateGraph:
 
     wf.add_conditional_edges("graph_query", route_after_graph, {
         "assemble": "assemble",
+        "web_answer": "web_answer",
         "vector_fallback": "vector_fallback",
     })
     wf.add_edge("vector_fallback", "assemble")

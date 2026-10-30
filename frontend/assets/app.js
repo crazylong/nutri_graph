@@ -1415,6 +1415,7 @@ async function ask(question) {
 
   busy = true;
   send.disabled = true;
+  rememberQuery(q);
   input.value = '';
   autoGrow();
 
@@ -1486,9 +1487,67 @@ function autoGrow() {
   input.style.height = Math.min(input.scrollHeight, 132) + 'px';
 }
 
-input.addEventListener('input', autoGrow);
+/* 本页提问历史，只活在这次打开里。刷新即丢，不进 localStorage，也不跟服务端会话走。
+   上下箭头像终端一样回填：单行里随时可翻；多行时上箭头只在第一行、下箭头只在最后一行生效，
+   免得抢光标。翻到最新之后再按向下，恢复翻历史之前正在打的草稿。 */
+const queryHistory = [];
+let queryHistoryPos = 0;
+let queryDraft = '';
+
+function rememberQuery(text) {
+  const q = (text || '').trim();
+  if (!q) return;
+  if (queryHistory[queryHistory.length - 1] !== q) queryHistory.push(q);
+  queryHistoryPos = queryHistory.length;
+  queryDraft = '';
+}
+
+function caretOnFirstLine() {
+  if (input.selectionStart !== input.selectionEnd) return false;
+  return !input.value.slice(0, input.selectionStart).includes('\n');
+}
+
+function caretOnLastLine() {
+  if (input.selectionStart !== input.selectionEnd) return false;
+  return !input.value.slice(input.selectionEnd).includes('\n');
+}
+
+function showRecalled(text) {
+  input.value = text;
+  const end = text.length;
+  input.setSelectionRange(end, end);
+  autoGrow();
+}
+
+function stepQueryHistory(dir) {
+  if (!queryHistory.length) return false;
+  if (dir < 0) {
+    if (!caretOnFirstLine()) return false;
+    if (queryHistoryPos === queryHistory.length) queryDraft = input.value;
+    if (queryHistoryPos === 0) return true;
+    queryHistoryPos -= 1;
+    showRecalled(queryHistory[queryHistoryPos]);
+    return true;
+  }
+  if (queryHistoryPos >= queryHistory.length) return false;
+  if (!caretOnLastLine()) return false;
+  queryHistoryPos += 1;
+  showRecalled(queryHistoryPos === queryHistory.length ? queryDraft : queryHistory[queryHistoryPos]);
+  return true;
+}
+
+input.addEventListener('input', () => {
+  autoGrow();
+  queryHistoryPos = queryHistory.length;
+  queryDraft = input.value;
+});
 input.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  if (e.isComposing) return;
+  if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+    if (stepQueryHistory(e.key === 'ArrowUp' ? -1 : 1)) e.preventDefault();
+    return;
+  }
+  if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     ask();
   }

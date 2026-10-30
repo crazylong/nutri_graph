@@ -31,8 +31,8 @@ def cache_key(question: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def allowed(state: dict) -> bool:
-    """plans 已经为空时，还要过意图、健康自述和「像不像食材」。"""
+def search_permitted(state: dict) -> bool:
+    """开关、意图白名单、健康自述。不要求句里有未收录食材。"""
     if not config.WEB_SEARCH_ENABLED:
         return False
     intents = state.get("_intents") or ["pair"]
@@ -42,6 +42,13 @@ def allowed(state: dict) -> bool:
     from graph.boundary import mentions_health_constraint
 
     if mentions_health_constraint(state.get("question") or ""):
+        return False
+    return True
+
+
+def allowed(state: dict) -> bool:
+    """未收录词还要过意图、健康自述和「像不像食材」。有已收录食材时也用这道闸。"""
+    if not search_permitted(state):
         return False
     from kg.request import is_plausible_food
 
@@ -114,6 +121,19 @@ def _host_sources(rows: list[WebResult]) -> list[dict[str, str]]:
     return out
 
 
+def _lead(state: dict, results) -> str:
+    """搭配边为 0 时，食材其实已经收录，不能再说还没进知识库。"""
+    line = _registration_line(results)
+    if state.get("_web_reason") != "pair_gap" or line != "这些食材还没进知识库。":
+        return line
+    from graph.nodes import known_ingredient_names
+
+    names = known_ingredient_names(state.get("_entities"))
+    if names:
+        return f"「{'、'.join(names)}」已经收录，但图谱里没有搭配方面的证据。"
+    return "图谱里没有搭配方面的证据。"
+
+
 def _registration_line(results) -> str:
     from graph.nodes import _visible_requests
 
@@ -147,9 +167,22 @@ def _wrap(head: str, body: str, sources: list[dict[str, str]]) -> str:
     )
 
 
-def _fallback(results, *, web: dict | None = None) -> dict:
-    from graph.nodes import _food_payload, _uncatalogued_message
+def _fallback(results, *, web: dict | None = None, state: dict | None = None) -> dict:
+    from graph.nodes import _food_payload, _uncatalogued_message, catalogued_gap_answer
 
+    reason = (state or {}).get("_web_reason")
+    gap = catalogued_gap_answer((state or {}).get("_entities")) if reason == "pair_gap" else None
+    if gap:
+        return {
+            "answer": gap,
+            "basis": [],
+            "gaps": ["缺少搭配证据"],
+            "confidence": 0.0,
+            "_graph_hit": False,
+            "_degraded": False,
+            "_food_requests": [],
+            "_web_answer": web or {"used": False, "sources": [], "blocked": ""},
+        }
     return {
         "answer": _uncatalogued_message(results),
         "basis": [],
@@ -162,11 +195,11 @@ def _fallback(results, *, web: dict | None = None) -> dict:
     }
 
 
-def _success(results, body: str, sources: list[dict], confidence: float, blocked: str = "") -> dict:
+def _success(results, body: str, sources: list[dict], confidence: float, blocked: str = "", lead: str = "") -> dict:
     from graph.nodes import _food_payload
 
     return {
-        "answer": _wrap(_registration_line(results), body, sources),
+        "answer": _wrap(lead or _registration_line(results), body, sources),
         "basis": [],
         "gaps": [f"图谱未收录：{item.food_key or item.term}" for item in results if item.food_key or item.term],
         "confidence": _clamp(confidence),
@@ -295,8 +328,8 @@ def answer(
                 text, sources, _hits = cached
                 sources = sources or []
                 if not text:
-                    return _fallback(results, web={"used": False, "sources": [], "blocked": "negative"})
-                return _success(results, text, sources, _CONFIDENCE_CAP)
+                    return _fallback(results, state=state, web={"used": False, "sources": [], "blocked": "negative"})
+                return _success(results, text, sources, _CONFIDENCE_CAP, lead=_lead(state, results))
     except Exception as exc:
         log.warning("读网页回答缓存失败，继续搜：%s", exc)
 
@@ -310,7 +343,7 @@ def answer(
             )
             if hourly >= config.WEB_ANSWER_USER_HOURLY:
                 _log(conn, user_id=user_id, query_hash=key, blocked="rate", elapsed_ms=elapsed())
-                return _fallback(results, web={"used": False, "sources": [], "blocked": "rate"})
+                return _fallback(results, state=state, web={"used": False, "sources": [], "blocked": "rate"})
             used = _count_attempts(
                 conn,
                 "created_at > now() - interval '1 day'",
@@ -318,14 +351,14 @@ def answer(
             )
             if used >= config.WEB_ANSWER_DAILY_BUDGET:
                 _log(conn, user_id=user_id, query_hash=key, blocked="budget", elapsed_ms=elapsed())
-                return _fallback(results, web={"used": False, "sources": [], "blocked": "budget"})
+                return _fallback(results, state=state, web={"used": False, "sources": [], "blocked": "budget"})
     except Exception as exc:
         log.warning("网页搜索预算检查失败，按不能搜处理：%s", exc)
-        return _fallback(results, web={"used": False, "sources": [], "blocked": "error"})
+        return _fallback(results, state=state, web={"used": False, "sources": [], "blocked": "error"})
 
     if search_fn is _search and not config.WEB_SEARCH_API_KEY and config.WEB_SEARCH_PROVIDER != "null":
         _safe_log(user_id, key, ok=False, error="no_key", elapsed_ms=elapsed())
-        return _fallback(results, web={"used": False, "sources": [], "blocked": "error"})
+        return _fallback(results, state=state, web={"used": False, "sources": [], "blocked": "error"})
 
     try:
         rows = search_fn(query)
@@ -334,14 +367,14 @@ def answer(
             user_id, key, ok=False, error=str(exc),
             provider=config.WEB_SEARCH_PROVIDER, elapsed_ms=elapsed(),
         )
-        return _fallback(results, web={"used": False, "sources": [], "blocked": "error"})
+        return _fallback(results, state=state, web={"used": False, "sources": [], "blocked": "error"})
     except Exception as exc:
         log.warning("网页搜索失败：%s", exc)
         _safe_log(
             user_id, key, ok=False, error=f"{type(exc).__name__}: {exc}",
             provider=config.WEB_SEARCH_PROVIDER, elapsed_ms=elapsed(),
         )
-        return _fallback(results, web={"used": False, "sources": [], "blocked": "error"})
+        return _fallback(results, state=state, web={"used": False, "sources": [], "blocked": "error"})
 
     kept, hits, raw_count = _filter(rows)
     if hits:
@@ -352,7 +385,7 @@ def answer(
             blocked="L2", provider=config.WEB_SEARCH_PROVIDER, elapsed_ms=elapsed(),
         )
         _safe_cache(key, question, "", [], config.WEB_ANSWER_NEGATIVE_TTL_H)
-        return _fallback(results, web={"used": False, "sources": [], "blocked": "L2"})
+        return _fallback(results, state=state, web={"used": False, "sources": [], "blocked": "L2"})
 
     sources = _host_sources(kept)
     snippets = [{"title": row.title, "content": row.content, "site": row.site} for row in kept]
@@ -361,8 +394,9 @@ def answer(
     prompt = build_web_prompt(question, snippets, herbal=is_herbal(question))
     remaining_ms = config.WEB_ANSWER_BUDGET_MS - elapsed()
     generated = None
+    lead = _lead(state, results)
     header = (
-        f"{_registration_line(results)}\n"
+        f"{lead}\n"
         "以下是网络检索的结果，未经审核，不能作为食疗依据：\n\n"
     )
     if live is not None and remaining_ms > 0:
@@ -382,7 +416,7 @@ def answer(
             user_id, key, ok=True, result_count=raw_count, kept_count=len(kept),
             provider=config.WEB_SEARCH_PROVIDER, elapsed_ms=elapsed(),
         )
-        return _present(live, _success(results, body, sources, _CONFIDENCE_CAP))
+        return _present(live, _success(results, body, sources, _CONFIDENCE_CAP, lead=lead))
 
     model_text = str(generated.get("answer") or "")
     political = has_political(model_text)
@@ -392,7 +426,7 @@ def answer(
             user_id, key, ok=True, result_count=raw_count, kept_count=len(kept),
             blocked="L3", provider=config.WEB_SEARCH_PROVIDER, elapsed_ms=elapsed(),
         )
-        return _present(live, _fallback(results, web={"used": False, "sources": [], "blocked": "L3"}))
+        return _present(live, _fallback(results, state=state, web={"used": False, "sources": [], "blocked": "L3"}))
 
     trimmed, sent_hits = trim_sentences(model_text)
     if sent_hits:
@@ -408,7 +442,7 @@ def answer(
         user_id, key, ok=True, result_count=raw_count, kept_count=len(kept),
         blocked=blocked, provider=config.WEB_SEARCH_PROVIDER, elapsed_ms=elapsed(),
     )
-    done = _success(results, body, sources, generated.get("confidence", _CONFIDENCE_CAP), blocked)
+    done = _success(results, body, sources, generated.get("confidence", _CONFIDENCE_CAP), blocked, lead=lead)
     if live is not None and live.sent_text:
         live.text_delta(
             f"\n\n{_source_block(sources)}\n\n"

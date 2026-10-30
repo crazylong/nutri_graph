@@ -7,7 +7,7 @@ import pytest
 
 import config
 from graph.boundary import build_web_prompt, mentions_health_constraint
-from graph.nodes import _eligible_terms, route_after_link
+from graph.nodes import _eligible_terms, route_after_graph, route_after_link
 from kg.request import extract_candidates
 from kg.sensitive import MEDICAL_FALLBACK, POLITICAL_ANSWER, term_hash
 from kg.webanswer import _clamp, _filter, answer, cache_key
@@ -130,7 +130,8 @@ def test_self_report_filter_keeps_weight_words():
     assert _eligible_terms(_state(gout)) == ["猪脚"]
 
 
-def test_route_skips_search_for_health_and_half_parse(monkeypatch):
+@pytest.mark.no_db
+def test_route_searches_when_any_food_is_missing(monkeypatch):
     pregnant = "我怀孕了，猪脚和天麻能一起煲汤吗"
     assert mentions_health_constraint(pregnant)
     assert route_after_link(_state(pregnant)) == "uncatalogued"
@@ -142,10 +143,57 @@ def test_route_skips_search_for_health_and_half_parse(monkeypatch):
     half = _state("牛肉和天麻能一起吃吗", unresolved=["天麻"])
     half["_entities"] = [{"label": "Ingredient", "canonical_id": "ING_BEEF"}]
     half["_intents"] = ["pair"]
-    assert route_after_link(half) == "graph_query"
+    assert route_after_link(half) == "web_answer"
+
+    soup = _state("天麻猪脚莲子汤搭配吗", unresolved=["天麻"])
+    soup["_entities"] = [
+        {"label": "Ingredient", "canonical_id": "ING_PIG", "matched_alias": "猪脚"},
+        {"label": "Ingredient", "canonical_id": "ING_LOTUS", "matched_alias": "莲子"},
+    ]
+    soup["_intents"] = ["pair"]
+    assert route_after_link(soup) == "web_answer"
+
+    noise = _state("牛肉的营养怎么样", unresolved=["营养"])
+    noise["_entities"] = [{"label": "Ingredient", "canonical_id": "ING_BEEF"}]
+    noise["_intents"] = ["pair"]
+    assert route_after_link(noise) == "graph_query"
 
     monkeypatch.setattr(config, "WEB_SEARCH_ENABLED", False)
+    assert route_after_link(half) == "graph_query"
     assert route_after_link(_state(SAMPLE)) == "uncatalogued"
+
+
+@pytest.mark.no_db
+def test_zero_pair_edges_go_to_web_search(monkeypatch):
+    from kg.webanswer import _fallback, _lead
+
+    state = {
+        "question": "猪脚莲子煲汤可以吗",
+        "_graph_hit": False,
+        "_web_reason": "pair_gap",
+        "_intents": ["pair"],
+        "_entities": [
+            {"label": "Ingredient", "matched_alias": "莲子"},
+            {"label": "Ingredient", "matched_alias": "猪脚"},
+        ],
+    }
+    assert route_after_graph(state) == "web_answer"
+    assert "还没进知识库" not in _lead(state, [])
+    assert "莲子" in _lead(state, []) and "猪脚" in _lead(state, [])
+    failed = _fallback([], state=state, web={"used": False, "sources": [], "blocked": "error"})
+    assert "已经收录" in failed["answer"]
+    assert "没能对应" not in failed["answer"]
+
+    assert route_after_graph({**state, "_graph_hit": True}) == "assemble"
+    assert route_after_graph({
+        "question": "莲子有什么营养",
+        "_graph_hit": False,
+        "_intents": ["nutrition"],
+    }) == "vector_fallback"
+    assert route_after_graph({**state, "question": "我怀孕了，猪脚莲子煲汤可以吗"}) == "vector_fallback"
+
+    monkeypatch.setattr(config, "WEB_SEARCH_ENABLED", False)
+    assert route_after_graph(state) == "vector_fallback"
 
 
 def test_trim_keeps_a_short_remainder_and_ignores_superlative():

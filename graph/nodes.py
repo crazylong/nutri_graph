@@ -328,21 +328,24 @@ def route_after_link(state: dict) -> str:
     """有能落地的 (意图, 节点) 才走图。
 
     食材问法要有 Ingredient，症状问法要有 Symptom。
-    对得上 → graph_query（哪怕还有别的词没对上，也不改去搜网页）
-    一个都对不上、开关开着、问法允许 → web_answer
-    对不上、但不该搜 → uncatalogued
+    有未收录食材、开关开着、问法允许 → web_answer
+        （有一种食材不在图谱里，就整句交给网页参考，不再只答已收录的那一半）
+    对得上且不该搜 → graph_query
+    一个都对不上、但不该搜 → uncatalogued
     其余 → vector_fallback
     """
     entities = state.get("_entities") or []
     intents = state.get("_intents") or ["pair"]
-    if plan_queries(entities, intents):
-        return "graph_query"
+    planned = bool(plan_queries(entities, intents))
     if state.get("_unresolved"):
         from kg.webanswer import allowed
 
         if allowed(state):
             return "web_answer"
-        return "uncatalogued"
+        if not planned:
+            return "uncatalogued"
+    if planned:
+        return "graph_query"
     return "vector_fallback"
 
 
@@ -390,7 +393,7 @@ def graph_query_node(state: dict) -> dict:
 
     graph_hit = bool(results)
     provisional_count = sum(1 for r in results if r.get("provisional"))
-    return {
+    out = {
         "_graph_results": results,
         "_graph_hit": graph_hit,
         "_degraded": False,
@@ -398,11 +401,44 @@ def graph_query_node(state: dict) -> dict:
         "_provisional_count": provisional_count,
         "_user_profile": profile,
     }
+    # 搭配问法一条推荐边都没有。后面可以改走网页参考，而不是直接弃答。
+    if any(plan.get("intent") == "pair" for plan in plans) and not results:
+        out["_web_reason"] = "pair_gap"
+    return out
+
+
+def known_ingredient_names(entities) -> list[str]:
+    names = []
+    for entity in entities or []:
+        if entity.get("label") != "Ingredient":
+            continue
+        name = entity.get("matched_alias") or entity.get("name")
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def catalogued_gap_answer(entities) -> str | None:
+    """食材已收录、但这次没有证据时的弃答。没有已收录食材则返回 None。"""
+    known = known_ingredient_names(entities)
+    if not known:
+        return None
+    return (
+        f"「{'、'.join(known)}」已经收录，"
+        "但我暂时没有能回答这个问题的确切依据 —— "
+        "图谱里有它的基础信息，还缺这方面的证据。"
+        "我不想凭常识推测，所以这里不给建议。"
+    )
 
 
 def route_after_graph(state: dict) -> str:
     if state.get("_graph_hit"):
         return "assemble"
+    if state.get("_web_reason") == "pair_gap":
+        from kg.webanswer import search_permitted
+
+        if search_permitted(state):
+            return "web_answer"
     return "vector_fallback"
 
 
@@ -478,19 +514,11 @@ def generate_node(state: dict) -> dict:
     if not facts and not vector_results:
         # 但要把「食材不认识」和「食材认识、只是没有这方面的证据」分开说。
         # 都回一句「没有找到确切依据」的话，用户会以为食材没收录，转头又登记一次。
-        known = [
-            e.get("matched_alias") or e.get("name")
-            for e in (state.get("_entities") or [])
-            if e.get("label") == "Ingredient"
-        ]
-        if known:
-            answer = (
-                f"「{'、'.join(dict.fromkeys(known))}」已经收录，"
-                "但我暂时没有能回答这个问题的确切依据 —— "
-                "图谱里有它的基础信息，还缺这方面的证据。"
-                "我不想凭常识推测，所以这里不给建议。"
-            )
-            gaps = [f"缺少「{'、'.join(dict.fromkeys(known))}」在该问题上的证据"]
+        known = known_ingredient_names(state.get("_entities"))
+        gap = catalogued_gap_answer(state.get("_entities"))
+        if gap:
+            answer = gap
+            gaps = [f"缺少「{'、'.join(known)}」在该问题上的证据"]
         else:
             answer = NONE_ANSWER
             gaps = ["无检索证据"]

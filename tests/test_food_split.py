@@ -51,9 +51,11 @@ def test_split_failure_returns_empty():
     assert split_compound("猪脚天麻当归", boom) == []
 
 
-def test_split_timeout_returns_empty():
+def test_split_timeout_returns_empty(monkeypatch):
+    monkeypatch.setattr("kg.segment.SPLIT_TIMEOUT_SEC", 0.2)
+
     def slow(_text):
-        time.sleep(4)
+        time.sleep(0.5)
         return ["猪脚"]
 
     assert split_compound("猪脚天麻当归", slow) == []
