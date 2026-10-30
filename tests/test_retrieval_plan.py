@@ -152,6 +152,8 @@ def test_vector_hit_is_labeled_as_document_not_graph(monkeypatch):
     assert "不是图谱结论" in out["answer"]
     assert "某文档写了菠菜" in out["answer"]
     assert out["_degraded"] is True
+    assert out["basis"] == ["d1"]
+    assert out["confidence"] == 0.4
 
 
 def test_prompt_uses_age_and_symptoms_without_inventing():
@@ -314,7 +316,7 @@ def test_answer_call_disables_thinking(monkeypatch):
     seen = {}
 
     class Msg:
-        content = '{"answer":"行","basis":[],"gaps":[],"confidence":0.8}'
+        content = "行"
 
     def fake(prompt, **kwargs):
         seen.update(kwargs)

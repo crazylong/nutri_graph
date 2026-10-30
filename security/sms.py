@@ -44,6 +44,7 @@ class SendResult:
     ok: bool
     provider: str
     msg_id: str = ""
+    biz_id: str = ""
     dev_code: str = ""      # 仅 console provider 且 DEBUG 时回填
     error: str = ""
 
@@ -191,9 +192,14 @@ class DypnsProvider(SmsProvider):
 
             model = getattr(body, "model", None)
             dev_code = ""
-            if config.SMS_RETURN_VERIFY_CODE and model is not None:
-                dev_code = getattr(model, "verify_code", "") or ""
-            return SendResult(ok=True, provider=self.name, msg_id=out_id, dev_code=dev_code)
+            biz_id = ""
+            if model is not None:
+                biz_id = str(getattr(model, "biz_id", None) or getattr(model, "BizId", None) or "")
+                if config.SMS_RETURN_VERIFY_CODE:
+                    dev_code = getattr(model, "verify_code", "") or ""
+            return SendResult(
+                ok=True, provider=self.name, msg_id=out_id, biz_id=biz_id, dev_code=dev_code,
+            )
         except SmsConfigError:
             # 没配好就是没配好，让 api 层翻译成 503，不要伪装成「上游失败」
             raise

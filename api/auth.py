@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import logging
 import re
+import hmac
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import config
@@ -245,6 +247,9 @@ def send_sms(req: SmsRequest, request: Request):
         msg_id=result.msg_id,
         ok=result.ok,
         error=result.error,
+        phone_mask=phone_mask(phone),
+        biz_id=result.biz_id,
+        delivery_status="pending" if result.ok and provider.name == "dypns" else "none",
     )
 
     if not result.ok:
@@ -419,3 +424,36 @@ def delete_me(user: dict = Depends(get_current_user)):
         )
     log.info("账号已注销 user=%s 清理明细=%s", uid, purged)
     return {"ok": True, "purged": purged}
+
+
+@router.post("/sms/report")
+def sms_report(
+    request: Request,
+    payload: list = Body(...),
+    token: str = Query(""),
+):
+    """号码认证回执。未配置 token 时 503，不和请求里的空串比较。"""
+    ip = client_ip(request)
+    expected = config.SMS_REPORT_TOKEN
+    if not expected:
+        log.warning("短信回执未配置 token，拒绝来源 %s", ip)
+        return JSONResponse(status_code=503, content={"error": "回执未配置"})
+    if not hmac.compare_digest(expected.encode(), token.encode()):
+        log.warning("短信回执 token 不正确，来源 %s", ip)
+        return JSONResponse(status_code=404, content={"error": "not found"})
+
+    from security.sms_report import apply_item
+
+    missing = False
+    for item in payload:
+        if not isinstance(item, dict):
+            log.warning("短信回执条目不是对象，来源 %s", ip)
+            continue
+        if apply_item(item) == "missing":
+            missing = True
+    if missing:
+        return JSONResponse(
+            status_code=500,
+            content={"code": 500, "msg": "未找到对应发送记录"},
+        )
+    return {"code": 0, "msg": "接收成功"}

@@ -188,7 +188,7 @@ def test_frontend_drops_the_false_promise():
     assert "网络参考" in js
     assert "审核通过后就能查到" not in js
     assert "不会给出未核实的内容" not in js
-    assert "20261029b" in html
+    assert "20261030a" in html
     assert "noopener noreferrer" in js
 
 
@@ -551,8 +551,14 @@ def test_third_food_is_not_marked_registered(schema, calls):
         _purge(question, user)
 
 
+def _named_food(question, llm=None):
+    """不把「测甲乙丙是不是食材」交给线上模型。模型回 [] 时这条链路根本进不了未收录。"""
+    return ["测甲乙丙"] if "测甲乙丙" in (question or "") else []
+
+
 @requires_pg
 def test_switch_off_does_not_search(schema, client, monkeypatch):
+    monkeypatch.setattr("kg.segment.extract_foods", _named_food)
     monkeypatch.setattr(config, "WEB_SEARCH_ENABLED", False)
     searched = []
     monkeypatch.setattr(
@@ -660,6 +666,7 @@ def test_web_hits_are_logged_as_hashes(schema):
 
 @requires_pg
 def test_timeout_returns_http_200(schema, client, monkeypatch):
+    monkeypatch.setattr("kg.segment.extract_foods", _named_food)
     monkeypatch.setattr(
         "kg.webanswer._search",
         lambda query: (_ for _ in ()).throw(WebSearchError("timeout")),

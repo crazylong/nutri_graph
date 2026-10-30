@@ -45,6 +45,11 @@ PROVISIONAL_DISCLAIMER = (
 
 NONE_ANSWER = "抱歉，我没有找到关于这个问题的确切依据，无法给出具体的食疗建议。"
 
+MODEL_UNAVAILABLE = (
+    "当前模型暂时都不可用（额度用尽或全部冷却中），无法生成回答。"
+    "检索结果已就绪，稍后重试即可；如情况紧急请直接就医。"
+)
+
 
 def build_grounded_prompt(
     question: str,
@@ -94,7 +99,7 @@ def build_grounded_prompt(
         f"{history_block}"
         f"图检索事实：\n{ctx}\n\n"
         f"用户问题：{question}\n\n"
-        '请以 JSON 返回：{"answer":"...","basis":["引用的关键事实"],"gaps":["未覆盖的点"],"confidence":0.0-1.0}'
+        "用纯文本回答，不要 JSON。"
     )
 
 
@@ -121,7 +126,7 @@ def build_document_prompt(
         f"{history_block}"
         f"文档片段：\n{ctx}\n\n"
         f"用户问题：{question}\n\n"
-        '请以 JSON 返回：{"answer":"...","basis":["引用的片段"],"gaps":["未覆盖的点"],"confidence":0.0-1.0}'
+        "用纯文本回答，不要 JSON。"
     )
 
 
@@ -153,8 +158,7 @@ def build_web_prompt(
         f"{herbal_note}"
         f"网页片段：\n{ctx}\n\n"
         f"用户问题：{question}\n\n"
-        '请以 JSON 返回：{"answer":"...","cited":["用到的站点"],"confidence":0到0.25}\n'
-        "confidence 必须在 0 到 0.25 之间。"
+        "用纯文本回答，不要 JSON。把握由系统记录，不超过 0.25。"
     )
 
 

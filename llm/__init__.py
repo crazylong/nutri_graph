@@ -33,7 +33,7 @@ from llm.router import (
     probe_model,
     reset_pool_state,
 )
-from llm.agent import get_model_agent, invoke_model
+from llm.agent import get_model_agent, invoke_model, stream_model
 
 __all__ = [
     "FailureKind",
@@ -53,5 +53,6 @@ __all__ = [
     "primary_model",
     "probe_model",
     "reset_pool_state",
+    "stream_model",
     "wrap_call_model",
 ]

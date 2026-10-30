@@ -59,13 +59,26 @@ def _generate(prompt: str) -> dict:
     if not config.DASHSCOPE_API_KEY:
         raise WebSearchError("no_model_key")
     from llm import LLMUnavailableError, invoke_model
+    from llm.streamctx import hook
+
+    if hook() is not None:
+        from llm import stream_model
+        from llm.streamctx import ModelStreamBroken, StreamCancelled
+
+        try:
+            text = stream_model(prompt, enable_thinking=False)
+        except (StreamCancelled, ModelStreamBroken):
+            raise
+        except LLMUnavailableError as exc:
+            raise WebSearchError("model_unavailable") from exc
+        return {"answer": text, "confidence": _CONFIDENCE_CAP}
 
     try:
         resp = invoke_model(prompt, enable_thinking=False)
     except LLMUnavailableError as exc:
         raise WebSearchError("model_unavailable") from exc
     content = getattr(resp, "content", resp)
-    return _parse_model(content)
+    return _parse_model(content if isinstance(content, str) else str(content or ""))
 
 
 def _parse_model(content: str) -> dict:
@@ -265,6 +278,11 @@ def answer(
     started = time.perf_counter()
     search_fn = search_fn or _search
     generate_fn = generate_fn or _generate
+    from llm.streamctx import ModelStreamBroken, StreamCancelled, hook
+
+    live = hook()
+    if live is not None:
+        live.status("正在检索公开资料")
 
     def elapsed() -> int:
         return int((time.perf_counter() - started) * 1000)
@@ -343,9 +361,17 @@ def answer(
     prompt = build_web_prompt(question, snippets, herbal=is_herbal(question))
     remaining_ms = config.WEB_ANSWER_BUDGET_MS - elapsed()
     generated = None
+    header = (
+        f"{_registration_line(results)}\n"
+        "以下是网络检索的结果，未经审核，不能作为食疗依据：\n\n"
+    )
+    if live is not None and remaining_ms > 0:
+        live.push_fixed(header)
     if remaining_ms > 0:
         try:
             generated = generate_fn(prompt)
+        except (StreamCancelled, ModelStreamBroken):
+            raise
         except Exception as exc:
             log.warning("网页回答生成失败，改贴片段：%s", exc)
             generated = None
@@ -356,7 +382,7 @@ def answer(
             user_id, key, ok=True, result_count=raw_count, kept_count=len(kept),
             provider=config.WEB_SEARCH_PROVIDER, elapsed_ms=elapsed(),
         )
-        return _success(results, body, sources, _CONFIDENCE_CAP)
+        return _present(live, _success(results, body, sources, _CONFIDENCE_CAP))
 
     model_text = str(generated.get("answer") or "")
     political = has_political(model_text)
@@ -366,7 +392,7 @@ def answer(
             user_id, key, ok=True, result_count=raw_count, kept_count=len(kept),
             blocked="L3", provider=config.WEB_SEARCH_PROVIDER, elapsed_ms=elapsed(),
         )
-        return _fallback(results, web={"used": False, "sources": [], "blocked": "L3"})
+        return _present(live, _fallback(results, web={"used": False, "sources": [], "blocked": "L3"}))
 
     trimmed, sent_hits = trim_sentences(model_text)
     if sent_hits:
@@ -382,7 +408,19 @@ def answer(
         user_id, key, ok=True, result_count=raw_count, kept_count=len(kept),
         blocked=blocked, provider=config.WEB_SEARCH_PROVIDER, elapsed_ms=elapsed(),
     )
-    return _success(results, body, sources, generated.get("confidence", _CONFIDENCE_CAP), blocked)
+    done = _success(results, body, sources, generated.get("confidence", _CONFIDENCE_CAP), blocked)
+    if live is not None and live.sent_text:
+        live.text_delta(
+            f"\n\n{_source_block(sources)}\n\n"
+            "（提示：以上内容来自公开网页，未经人工审核，不能替代医生或营养师意见。）"
+        )
+    return _present(live, done)
+
+
+def _present(live, body: dict) -> dict:
+    if live is not None and live.sent_text:
+        live.align(body.get("answer") or "")
+    return body
 
 
 def _remember(key: str, question: str, body: str, sources: list) -> None:

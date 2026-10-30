@@ -242,6 +242,13 @@ PHONE_HASH_PEPPER = os.getenv("PHONE_HASH_PEPPER", "")
 # 为什么不是「短信服务 SMS」：个人认证账号申请的自用签名无法通过运营商签名实名制报备，
 # 实际发不出去；且官方已停止受理「测试或学习 / 已备案网站 / 公众号」等签名来源。
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "console").lower()
+# 回执地址上的 token。为空时接口直接 503，不跟请求比较（空串和空串比会通过）。
+SMS_REPORT_TOKEN = os.getenv("SMS_REPORT_TOKEN", "")
+
+# 问答流式的事件列表。密码为空则 /chat/stream 在写出 SSE 之前返回 503。
+REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
 # ---- dypns（短信认证）----
 ALIBABA_CLOUD_ACCESS_KEY_ID = os.getenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "")

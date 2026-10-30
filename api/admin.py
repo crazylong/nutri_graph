@@ -874,3 +874,102 @@ def list_alias_candidates(
         )
         items = _rows(cur)
     return {"count": total, "limit": limit, "offset": offset, "items": items}
+
+
+_SMS_PAGE = 20
+
+
+def _sms_bound(raw: str, *, end: bool):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    text = (raw or "").strip()
+    if not text:
+        return None
+    tz = ZoneInfo("Asia/Shanghai")
+    try:
+        if len(text) == 10:
+            day = datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=tz)
+            if end:
+                return day.replace(hour=23, minute=59, second=59)
+            return day
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "range", "message": "时间格式不正确"},
+        )
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=tz)
+    return parsed
+
+
+@router.get("/sms")
+def list_sms(
+    phone: str = "",
+    from_: str = Query("", alias="from"),
+    to: str = "",
+    page: int = Query(1, ge=1),
+):
+    """短信发送记录。手机号用哈希等值匹配，响应只给掩码。"""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from api.auth import _require_valid_phone
+    from security.crypto import phone_hash, phone_mask
+
+    mask = ""
+    phone_eq = ""
+    if phone.strip():
+        valid = _require_valid_phone(phone)
+        phone_eq = phone_hash(valid)
+        mask = phone_mask(valid)
+
+    start = _sms_bound(from_, end=False)
+    end = _sms_bound(to, end=True)
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    if start is None and end is None:
+        end = now
+        start = now - timedelta(days=7)
+    elif start is None:
+        start = end - timedelta(days=7)
+    elif end is None:
+        end = now
+    if end < start or (end - start) > timedelta(days=31):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "range", "message": "时间跨度不能超过 31 天"},
+        )
+
+    where = "created_at >= %s AND created_at <= %s"
+    args: list = [start, end]
+    if phone_eq:
+        where += " AND phone_hash = %s"
+        args.append(phone_eq)
+    offset = (page - 1) * _SMS_PAGE
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(f"SELECT count(*) FROM sms_send_log WHERE {where}", args)
+        total = int(cur.fetchone()[0])
+        cur.execute(
+            "SELECT created_at, phone_mask, purpose, provider, ok, delivery_status, "
+            "err_code, err_msg, biz_id, provider_msg_id "
+            f"FROM sms_send_log WHERE {where} "
+            "ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s",
+            [*args, _SMS_PAGE, offset],
+        )
+        cols = [d[0] for d in cur.description]
+        items = []
+        for row in cur.fetchall():
+            item = dict(zip(cols, row))
+            created = item.get("created_at")
+            if created is not None and hasattr(created, "isoformat"):
+                item["created_at"] = created.isoformat()
+            items.append(item)
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": _SMS_PAGE,
+        "phone_mask": mask,
+    }

@@ -84,13 +84,18 @@ def _starved(msg: AIMessage | None) -> str:
     return ""
 
 
+def params_from(temperature=None, max_tokens=None) -> dict[str, Any]:
+    """流式没有 ModelRequest，只传温度和 max_tokens。空值走 config 默认。"""
+    return {"temperature": temperature, "max_tokens": max_tokens}
+
+
 def _model_params(request: ModelRequest) -> dict[str, Any]:
     """继承调用方（Agent 主模型）的采样参数，只是换 model。"""
     base = request.model
-    return {
-        "temperature": getattr(base, "temperature", None),
-        "max_tokens": getattr(base, "max_tokens", None),
-    }
+    return params_from(
+        temperature=getattr(base, "temperature", None),
+        max_tokens=getattr(base, "max_tokens", None),
+    )
 
 
 class _Plan:
@@ -99,9 +104,8 @@ class _Plan:
     顺序：池内可用模型（.env 里 LLM_MODEL_POOL 的顺序）→ 全都不行时用 LLM_MODEL 兜底。
     """
 
-    def __init__(self, request: ModelRequest):
-        self.request = request
-        self.params = _model_params(request)
+    def __init__(self, params: dict[str, Any]):
+        self.params = dict(params)
         self.specs: list[ModelSpec] = get_router().candidates()
         self.fallback: ModelSpec | None = fallback_spec()
         self.tried: set[str] = set()
@@ -189,7 +193,7 @@ class WrapCallModelMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> Any:
-        plan = _Plan(request)
+        plan = _Plan(_model_params(request))
         for spec in plan.order():
             budget = plan.budget(spec)
             try:
@@ -217,7 +221,7 @@ class WrapCallModelMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Any],
     ) -> Any:
-        plan = _Plan(request)
+        plan = _Plan(_model_params(request))
         for spec in plan.order():
             budget = plan.budget(spec)
             try:

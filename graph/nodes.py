@@ -7,7 +7,6 @@ graph/nodes.py —— LangGraph 节点实现
 """
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
@@ -260,6 +259,10 @@ def web_answer_node(state: dict) -> dict:
 
         return answer(state)
     except Exception as exc:  # noqa: BLE001 —— 搜网页失败也不能让 /chat 500
+        from llm.streamctx import ModelStreamBroken, StreamCancelled
+
+        if isinstance(exc, (StreamCancelled, ModelStreamBroken)):
+            raise
         log.warning("网页参考失败，改走未收录话术：%s", exc)
         if state.get("_registered_this_turn"):
             return {
@@ -520,15 +523,19 @@ def generate_node(state: dict) -> dict:
     if not facts and vector_results:
         if not config.DASHSCOPE_API_KEY:
             first = vector_results[0].get("text", "")
+            doc_ids = [str(item.get("doc_id")) for item in vector_results if item.get("doc_id")]
             return {
                 "answer": f"（占位回答）检索到文档，不是图谱结论：{first}",
-                "basis": [],
+                "basis": doc_ids,
                 "gaps": [],
                 "confidence": 0.4,
                 "_degraded": True,
             }
         prompt = build_document_prompt(state["question"], vector_results, profile, history)
-        return _complete_from_prompt(prompt, degraded=True)
+        doc_ids = [str(item.get("doc_id")) for item in vector_results if item.get("doc_id")]
+        return _complete_from_prompt(
+            prompt, basis=doc_ids, confidence=0.4, degraded=True,
+        )
 
     prompt = build_grounded_prompt(
         state["question"], facts, tier, profile,
@@ -541,11 +548,16 @@ def generate_node(state: dict) -> dict:
             answer = note + "\n" + answer
         return {
             "answer": answer,
-            "basis": [],
+            "basis": _fact_claims(facts),
             "gaps": [],
-            "confidence": 0.5,
+            "confidence": 0.8 if tier == "strong" else 0.4,
         }
-    return _complete_from_prompt(prompt, note=note)
+    return _complete_from_prompt(
+        prompt,
+        note=note,
+        basis=_fact_claims(facts),
+        confidence=0.8 if tier == "strong" else 0.4,
+    )
 
 
 def _recent_dialogue(state: dict) -> str:
@@ -564,44 +576,96 @@ def _recent_dialogue(state: dict) -> str:
         return ""
 
 
-def _complete_from_prompt(prompt: str, note: str = "", degraded: bool = False) -> dict:
-    """调模型池，把 JSON 回答拆开。池全不可用时明确说答不了。"""
+def _fact_claims(facts: list) -> list[str]:
+    claims = []
+    for fact in facts:
+        claim = fact.get("claim") or fact.get("text") or ""
+        if claim:
+            claims.append(str(claim))
+    return claims
+
+
+def _as_text(content) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                parts.append(str(block.get("text") or ""))
+        return "".join(parts).strip()
+    return str(content or "").strip()
+
+
+def _complete_from_prompt(
+    prompt: str,
+    note: str = "",
+    degraded: bool = False,
+    basis: list | None = None,
+    confidence: float = 0.5,
+    gaps: list | None = None,
+) -> dict:
+    """调模型池。依据和把握由调用方按路径算好，不向模型要 JSON。"""
+    from graph.boundary import MODEL_UNAVAILABLE
     from llm import LLMUnavailableError, invoke_model
+    from llm.streamctx import ModelStreamBroken, StreamCancelled, hook
+
+    basis = list(basis or [])
+    gaps = list(gaps or [])
+    live = hook()
+
+    def pack(answer: str, *, degraded_flag: bool = degraded, extra_gaps: list | None = None) -> dict:
+        out = {
+            "answer": answer,
+            "basis": basis,
+            "gaps": extra_gaps if extra_gaps is not None else gaps,
+            "confidence": confidence,
+        }
+        if degraded_flag:
+            out["_degraded"] = True
+        return out
+
+    if live is not None:
+        live.status("正在组织回答")
+        if note:
+            live.push_note(note)
+        try:
+            from llm import stream_model
+
+            stream_model(prompt, enable_thinking=False)
+        except (StreamCancelled, ModelStreamBroken):
+            raise
+        except LLMUnavailableError as exc:
+            log.warning("模型池不可用，降级作答：%s", exc)
+            live.align(MODEL_UNAVAILABLE)
+            return {
+                "answer": MODEL_UNAVAILABLE,
+                "basis": [],
+                "gaps": ["模型暂时全部不可用"],
+                "confidence": 0.0,
+                "_degraded": True,
+            }
+        return pack(live.finish())
 
     try:
         resp = invoke_model(prompt, enable_thinking=False)
     except LLMUnavailableError as exc:
         log.warning("模型池不可用，降级作答：%s", exc)
         return {
-            "answer": (
-                "当前模型暂时都不可用（额度用尽或全部冷却中），无法生成回答。"
-                "检索结果已就绪，稍后重试即可；如情况紧急请直接就医。"
-            ),
+            "answer": MODEL_UNAVAILABLE,
             "basis": [],
             "gaps": ["模型暂时全部不可用"],
             "confidence": 0.0,
             "_degraded": True,
         }
-    content = getattr(resp, "content", resp)
-    try:
-        obj = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
-        obj = {"answer": content}
-    answer = obj.get("answer", "")
+    answer = _as_text(getattr(resp, "content", resp))
     if note and note not in answer:
         answer = note + "\n" + answer
-    out = {
-        "answer": answer,
-        "basis": obj.get("basis", []),
-        "gaps": obj.get("gaps", []),
-        "confidence": float(obj.get("confidence", 0.5)),
-    }
-    if degraded:
-        out["_degraded"] = True
+    out = pack(answer)
 
-    # ---------- 输出扫描（步骤 2.9 / 计划 §3.7）----------
-    # 只扫模型生成的正文：免责声明是单独字段（config.DISCLAIMER），不在这里，
-    # 不会被扫到 —— 那条默认文案含「诊断」，扫它每条正常回答都会命中。
+    # 同步路径只在全文结束后改写一次。免责声明字段不在这里扫。
     if config.SENSITIVE_OUTPUT_SCAN:
         try:
             from kg.sensitive import log_hits, rewrite_answer
@@ -702,6 +766,10 @@ def retrieve_card(question: str, user_id: str) -> dict:
 
 
 def memory_write_node(state: dict) -> dict:
+    from llm.streamctx import skip_save
+
+    if skip_save():
+        return {}
     if not config.MEMORY_ENABLED:
         return {}
     try:

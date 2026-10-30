@@ -11,6 +11,7 @@ import Import from './views/Import.vue'
 import ImportJobs from './views/ImportJobs.vue'
 import Foods from './views/Foods.vue'
 import FoodDetail from './views/FoodDetail.vue'
+import SmsLogs from './views/SmsLogs.vue'
 import { tokens } from './api'
 
 const router = createRouter({
@@ -32,6 +33,7 @@ const router = createRouter({
         { path: 'imports', component: ImportJobs },
         { path: 'foods', component: Foods },
         { path: 'foods/:cid', component: FoodDetail },
+        { path: 'sms', component: SmsLogs },
       ],
     },
   ],

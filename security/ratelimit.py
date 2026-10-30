@@ -12,8 +12,8 @@ security/ratelimit.py —— 短信频控与验证码失败锁定
   设备指纹 10 次/天
   全局 200 次/天（超限即熔断，次日恢复）
 
-为什么不用 Redis：单机 QPS 个位数，sms_send_log 建好索引做窗口计数完全够；
-多引一个中间件不值得（与项目「统一 PG、不引 Redis」的既有决策一致）。
+频控仍用 sms_send_log 做窗口计数，不改用 Redis。
+问答流式另有 Redis 列表，和这里的发送额度无关。
 """
 from __future__ import annotations
 
@@ -203,15 +203,22 @@ def record_send(
     msg_id: str = "",
     ok: bool = True,
     error: str = "",
+    phone_mask: str = "",
+    biz_id: str = "",
+    delivery_status: str = "none",
 ) -> None:
     """每次下发都记一条（成功与否都记），失败也计入频控可防止「靠失败无限重试」。"""
     try:
         with db.connect() as conn:
             conn.execute(
                 "INSERT INTO sms_send_log "
-                "(phone_hash, ip, device_fp, purpose, provider, provider_msg_id, ok, error) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                (phone_hash, ip, device_fp, purpose, provider, msg_id, ok, error[:500]),
+                "(phone_hash, ip, device_fp, purpose, provider, provider_msg_id, ok, error, "
+                " phone_mask, biz_id, delivery_status) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    phone_hash, ip, device_fp, purpose, provider, msg_id, ok, error[:500],
+                    phone_mask, biz_id, delivery_status,
+                ),
             )
     except Exception as exc:  # noqa: BLE001 —— 记账失败不能阻断主流程
         log.error("写入 sms_send_log 失败：%s", exc)

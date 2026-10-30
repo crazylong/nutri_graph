@@ -78,6 +78,8 @@ def _startup_report() -> None:
                 ("缺少配置 " + ", ".join(missing) + "；") if missing else "",
                 "" if sdk_ok else "缺少 SDK alibabacloud_dypnsapi20170525；",
             )
+    if not config.SMS_REPORT_TOKEN:
+        log.error("SMS_REPORT_TOKEN 未配置：短信回执接口将返回 503")
 
 
 @asynccontextmanager

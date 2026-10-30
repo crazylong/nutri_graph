@@ -11,6 +11,7 @@
         <el-menu-item index="/import-new">批量导入</el-menu-item>
         <el-menu-item index="/imports">导入记录</el-menu-item>
         <el-menu-item index="/foods">食物查询</el-menu-item>
+        <el-menu-item index="/sms">短信记录</el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>

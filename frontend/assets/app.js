@@ -1359,11 +1359,58 @@ document.getElementById('history-toggle').addEventListener('click', () => {
    ============================================================ */
 let busy = false;
 
+function openStreamCard() {
+  hideEmpty();
+  const wrap = el('div', 'a');
+  const card = el('div', 'card');
+  const status = el('p', 'meta', '正在查找');
+  const answer = el('p', 'answer');
+  card.append(status, answer);
+  wrap.append(el('div', 'avatar', '食'), card);
+  thread.appendChild(wrap);
+  scrollDown();
+  return { wrap, card, status, answer };
+}
+
+function appendAnswerExtras(card, body) {
+  const built = renderAnswer(body);
+  const inner = built.querySelector('.card');
+  if (!inner) return;
+  [...inner.children].forEach((child) => {
+    if (child.classList.contains('answer')) return;
+    card.appendChild(child);
+  });
+}
+
+async function readSse(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let cut;
+    while ((cut = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, cut);
+      buf = buf.slice(cut + 2);
+      if (!frame || frame.startsWith(':')) continue;
+      let event = 'message';
+      const dataLines = [];
+      frame.split('\n').forEach((line) => {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+      });
+      if (!dataLines.length) continue;
+      onEvent(event, JSON.parse(dataLines.join('')));
+    }
+  }
+}
+
 async function ask(question) {
   const q = (question ?? input.value).trim();
   if (!q || busy) return;
   if (gate.hidden === false) { phoneEl.focus(); return; }
-  // 敏感信息同意未处理时，先把弹窗拿出来，别让提问绕过授权
   if (consentOverlay && !consentOverlay.hidden) { input.focus(); return; }
 
   busy = true;
@@ -1372,39 +1419,56 @@ async function ask(question) {
   autoGrow();
 
   addQuestion(q);
-  const pending = addPending();
+  const card = openStreamCard();
 
   try {
     const payload = { question: q };
     const sid = localStorage.getItem(K_SID);
     if (sid) payload.session_id = sid;
-    // 健康信息是否允许收集：同意才允许后端提取个人健康特征
     const consent = localStorage.getItem(K_CONSENT);
     if (consent !== null) payload.consent = consent === '1';
-    const r = await api('/chat', {
+    const r = await api('/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
-    let body = null;
-    try { body = await r.json(); } catch { /* 可能是 nginx 的 429 页 */ }
+    const ctype = r.headers.get('content-type') || '';
+    if (!r.ok || !ctype.includes('text/event-stream')) {
+      let body = null;
+      try { body = await r.json(); } catch { /* nginx 的 429 页 */ }
+      card.wrap.remove();
+      if (r.status === 404) {
+        localStorage.removeItem(K_SID);
+        thread.appendChild(renderError(r.status, '这条对话不存在，请新开一轮。'));
+        loadHistory();
+      } else if (r.status === 401) {
+        showGate('请先登录。');
+      } else {
+        thread.appendChild(renderError(r.status, body && (body.detail || body.error)));
+      }
+      return;
+    }
 
-    pending.remove();
-    if (r.ok && body) {
-      if (body.session_id) localStorage.setItem(K_SID, body.session_id);
-      thread.appendChild(renderAnswer(body));
+    let result = null;
+    await readSse(r, (event, data) => {
+      if (event === 'status') card.status.textContent = data.text || '';
+      else if (event === 'text_delta') card.answer.textContent += data.text || '';
+      else if (event === 'answer_replace') {
+        card.answer.textContent = data.text == null ? '' : data.text;
+      } else if (event === 'error') {
+        card.card.appendChild(el('p', 'notice warn', data.text || '生成失败'));
+      } else if (event === 'result') result = data;
+      scrollDown();
+    });
+    if (result) {
+      if (result.session_id) localStorage.setItem(K_SID, result.session_id);
+      if (!card.answer.textContent && result.answer) card.answer.textContent = result.answer;
+      card.status.remove();
+      appendAnswerExtras(card.card, result);
       loadHistory();
-    } else if (r.status === 404) {
-      localStorage.removeItem(K_SID);
-      thread.appendChild(renderError(r.status, '这条对话不存在，请新开一轮。'));
-      loadHistory();
-    } else if (r.status === 401) {
-      showGate('请先登录。');
-    } else {
-      thread.appendChild(renderError(r.status, body && (body.detail || body.error)));
     }
   } catch {
-    pending.remove();
+    card.wrap.remove();
     thread.appendChild(renderError('网络', '连接被中断，请重试。'));
   } finally {
     busy = false;
