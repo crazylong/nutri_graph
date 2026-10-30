@@ -232,6 +232,19 @@ def food_detail(cid: str) -> dict:
     }
 
 
+def relation_method(term: str, canonical_name: str, raw_method: str) -> str:
+    """查询词和规范名相同才是精确命中。字典里的其它叫法才标成别名。
+
+    链接器对字典命中一律给 substring / exact，不区分「西红柿」和「番茄」。
+    若直接把非 fuzzy 都标成别名，规范名也会变成「西红柿 → 西红柿（别名）」。
+    """
+    if raw_method == "fuzzy":
+        return "fuzzy"
+    if canonical_name and normalize_text(term) == normalize_text(canonical_name):
+        return "exact"
+    return "alias"
+
+
 def relations(foods: list[str], confirm: bool = False) -> dict:
     cleaned = []
     for food in foods:
@@ -247,24 +260,35 @@ def relations(foods: list[str], confirm: bool = False) -> dict:
         if not hit or hit.get("label") != "Ingredient" or not hit.get("canonical_id"):
             missing.append({"term": food})
             continue
-        raw_method = hit.get("method") or ""
-        if raw_method == "fuzzy":
-            method = "fuzzy"
-        elif raw_method == "exact":
-            method = "exact"
-        else:
-            method = "alias"
+        cid = hit["canonical_id"]
+        try:
+            node = sg.fetch_node(cid)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("关系图取名失败：%s", exc)
+            raise FoodAdminError("graph_unavailable", "图谱暂时连不上，稍后重试。", 503) from exc
+        canonical = (node or {}).get("name") or food
         resolved.append({
             "term": food,
-            "canonical_id": hit["canonical_id"],
-            "name": hit.get("name") or food,
-            "method": method,
+            "canonical_id": cid,
+            "name": canonical,
+            "method": relation_method(food, canonical, hit.get("method") or ""),
+            "aliases": [
+                a for a in _aliases(cid)
+                if normalize_text(a) and normalize_text(a) != normalize_text(canonical)
+            ],
         })
     needs_confirm = any(item["method"] == "fuzzy" for item in resolved)
     subgraph = {"nodes": [], "edges": [], "meta": {"kind": "compare"}}
-    if (not needs_confirm or confirm) and len(resolved) >= 2:
+    cids = []
+    for item in resolved:
+        if item["canonical_id"] not in cids:
+            cids.append(item["canonical_id"])
+    if (not needs_confirm or confirm) and len(cids) >= 1 and len(resolved) >= 2:
         try:
-            subgraph = sg.compare_many([item["canonical_id"] for item in resolved])
+            if len(cids) == 1:
+                subgraph = sg.neighborhood(cids[0], depth=1)
+            else:
+                subgraph = sg.compare_many(cids)
         except Exception as exc:  # noqa: BLE001
             log.warning("关系图失败：%s", exc)
             raise FoodAdminError("graph_unavailable", "图谱暂时连不上，稍后重试。", 503) from exc

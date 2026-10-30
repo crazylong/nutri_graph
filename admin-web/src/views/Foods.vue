@@ -5,6 +5,7 @@
       <el-input v-model="q" placeholder="食物名、营养素，或胡萝卜 和 鸡蛋" style="width: 360px" @keyup.enter="run" />
       <el-button type="primary" @click="run">查询</el-button>
     </div>
+    <p v-if="!mode" class="hint">支持一次查询多种食物的关系，用顿号、空格或「和」隔开，例如：胡萝卜、鸡蛋、西红柿</p>
 
     <p v-if="hint" class="hint">{{ hint }}</p>
 
@@ -13,7 +14,7 @@
       <el-button @click="openNutrient(result.nutrient_matches[0])">当作营养素：{{ result.nutrient_matches[0].name }}</el-button>
     </div>
 
-    <template v-if="mode === 'food' || mode === 'fuzzy'">
+    <template v-if="(mode === 'food' || mode === 'fuzzy') && (result.matches || []).length">
       <el-table :data="result.matches || []" @selection-change="onSelect">
         <el-table-column type="selection" width="48" />
         <el-table-column prop="name" label="名称" />
@@ -58,10 +59,18 @@
     </template>
 
     <template v-if="mode === 'relation'">
+      <div class="rel-bar">
+        <strong>食物关系</strong>
+        <el-button @click="clearResult">返回</el-button>
+      </div>
       <p v-if="relation.needs_confirm">有模糊命中，确认后再画图。</p>
       <ul>
-        <li v-for="item in relation.resolved || []" :key="item.canonical_id">
-          {{ item.term }} → {{ item.name }}（{{ item.method }}）
+        <li v-for="item in relation.resolved || []" :key="item.term">
+          <template v-if="item.method === 'alias'">{{ item.term }} 是 {{ item.name }} 的别名</template>
+          <template v-else-if="item.method === 'fuzzy'">{{ item.term }} 模糊命中 {{ item.name }}</template>
+          <template v-else>
+            {{ item.name }}<span v-if="otherAliases(item)">，别名：{{ otherAliases(item) }}</span>
+          </template>
         </li>
       </ul>
       <p v-if="(relation.missing || []).length">未收录：{{ relation.missing.map((m) => m.term).join('、') }}</p>
@@ -90,6 +99,20 @@ const selected = ref([])
 
 function onSelect(rows) {
   selected.value = rows
+}
+
+function otherAliases(item) {
+  const name = item.name || ''
+  return (item.aliases || []).filter((alias) => alias && alias !== name).join('、')
+}
+
+function clearResult() {
+  mode.value = ''
+  hint.value = ''
+  result.value = {}
+  nutrient.value = {}
+  relation.value = {}
+  selected.value = []
 }
 
 async function run() {
@@ -213,4 +236,6 @@ async function removeSelected() {
 .bar h2 { margin: 0 12px 0 0; }
 .hint { color: #909399; }
 .choices { display: flex; gap: 8px; margin: 12px 0; }
+.rel-bar { display: flex; align-items: center; margin: 8px 0; }
+.rel-bar strong { flex: 1; }
 </style>

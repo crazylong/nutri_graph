@@ -97,36 +97,16 @@ def normalize_node(state: dict) -> dict:
 # link —— 实体链接（字典最长匹配 + 模糊 + 未收录候选）
 # ============================================================
 def link_node(state: dict) -> dict:
-    from kg.request import extract_candidates
-
     alias_store = get_alias_store()
     linker = EntityLinker(alias_store, vector_search=_entity_vector_search)
 
-    # 整句走字典最长匹配。没被别名盖住的片段再逐个走模糊和向量，
-    # 这两级在 EntityLinker.link 里，阈值读 ENTITY_LINK_THRESHOLD。
+    # 词典最长匹配只负责已经收录的别名。
+    # 句子里还有哪些食材，直接问模型，不再用停顿词把残句切成候选。
     norm = state.get("_normalized") or state.get("question", "")
     result = linker.link_question(norm)
-
-    candidates = extract_candidates(result.residual)
-    entities = list(result.entities)
-    unresolved: list[str] = []
-    split_terms: list[str] = []
-    for term in candidates:
-        extra = linker.link(term)
-        if extra.entities:
-            entities.extend(extra.entities)
-            continue
-        parts = _split_unlinked(term, linker)
-        if parts is None:
-            unresolved.append(term)
-            continue
-        for part in parts:
-            extra = linker.link(part)
-            if extra.entities:
-                entities.extend(extra.entities)
-            else:
-                unresolved.append(part)
-                split_terms.append(part)
+    entities, unresolved, split_terms = _mentions_from_model(
+        norm, list(result.entities), linker,
+    )
 
     seen: set[tuple[str, str]] = set()
     deduped = []
@@ -147,14 +127,22 @@ def link_node(state: dict) -> dict:
     }
 
 
-def _split_unlinked(term: str, linker) -> list[str] | None:
-    """没链上、且够长时才问模型。返回 None 表示保持整段。"""
-    if len(term) < 4:
-        return None
-    from kg.segment import split_compound
+def _mentions_from_model(question: str, entities: list, linker) -> tuple[list, list, list]:
+    """模型点名的食材才进入后续链接。点不到、超时、失败，都不把原句登记成食材。"""
+    from kg.segment import extract_foods
 
-    parts = split_compound(term, llm=getattr(linker, "llm", None))
-    return parts or None
+    named = extract_foods(question, llm=getattr(linker, "llm", None))
+    unresolved: list[str] = []
+    split_terms: list[str] = []
+    merged = list(entities)
+    for term in named:
+        extra = linker.link(term)
+        if extra.entities:
+            merged.extend(extra.entities)
+            continue
+        unresolved.append(term)
+        split_terms.append(term)
+    return merged, unresolved, split_terms
 
 
 def _entity_vector_search(query: str, top_k: int = 3) -> list[dict]:
@@ -184,7 +172,7 @@ _SELF_REPORT = (
 def _eligible_terms(state: dict) -> list[str]:
     """去掉自述。普通未识别词最多登记两个，防刷。
 
-    同一次 LLM 从一个残余片段拆出来的词单独放行，最多三个。
+    模型从原句点出、词典又没对上的词单独放行，最多三个。
     样例「猪脚天麻当归」要能登记全，又不能把全局上限放开。
     """
     split = set(state.get("_split_terms") or [])

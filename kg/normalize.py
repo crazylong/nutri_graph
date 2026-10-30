@@ -14,8 +14,8 @@ kg/normalize.py —— 归一与实体链接
   4. LLM 消歧：留给后续
 
 未命中时不是简单扔掉，而是：
-  - residual（没被任何别名占用的片段）交给 kg.request 抽候选词
-  - 对候选词再做一次模糊匹配，得到 near_misses（「你是不是想问黑豆？」）
+  - 原句交给模型点食材名（kg.segment.extract_foods），点中的再走 link
+  - 仍未命中的词做一次模糊匹配，得到 near_misses（「你是不是想问黑豆？」）
 """
 from __future__ import annotations
 
@@ -62,6 +62,11 @@ def normalize_text(s: str) -> str:
     return s
 
 
+def fold_alias(s: str) -> str:
+    """拉丁字母大小写不算两种写法。库里是「维C」，查「维c」也要命中。"""
+    return (s or "").lower()
+
+
 @dataclass
 class LinkedEntity:
     """实体链接结果。"""
@@ -102,19 +107,20 @@ class AliasStore:
         self._cache: list[dict[str, Any]] | None = None
 
     def exact_lookup(self, alias_norm: str, entity_type: str | None = None) -> list[dict]:
+        folded = fold_alias(alias_norm)
         with db.connect() as conn:
             cur = conn.cursor()
             if entity_type:
                 cur.execute(
                     "SELECT entity_type, canonical_id, alias, confidence FROM dict_alias "
-                    "WHERE alias_norm = %s AND entity_type = %s",
-                    (alias_norm, entity_type),
+                    "WHERE lower(alias_norm) = %s AND entity_type = %s",
+                    (folded, entity_type),
                 )
             else:
                 cur.execute(
                     "SELECT entity_type, canonical_id, alias, confidence FROM dict_alias "
-                    "WHERE alias_norm = %s",
-                    (alias_norm,),
+                    "WHERE lower(alias_norm) = %s",
+                    (folded,),
                 )
             rows = cur.fetchall()
         return [
@@ -187,7 +193,7 @@ class AliasStore:
         for row in self.all_aliases():
             if entity_type and row["entity_type"] != entity_type:
                 continue
-            sim = char_similarity(term, row["alias_norm"])
+            sim = char_similarity(fold_alias(term), fold_alias(row["alias_norm"] or ""))
             if sim >= min_sim:
                 scored.append({**row, "sim": round(sim, 4)})
         scored.sort(key=lambda r: -r["sim"])
@@ -246,6 +252,9 @@ class EntityLinker:
         result = LinkResult()
         if not norm:
             return result
+        # 大小写折成同一串再找。只在长度不变时用折后的下标，避免个别字符折完变长对不齐。
+        norm_fold = fold_alias(norm)
+        haystack = norm_fold if len(norm_fold) == len(norm) else norm
 
         occupied = [False] * len(norm)
         for row in sorted(
@@ -254,9 +263,11 @@ class EntityLinker:
             alias = row["alias_norm"]
             if not alias:
                 continue
+            alias_fold = fold_alias(alias)
+            needle = alias_fold if haystack is norm_fold and len(alias_fold) == len(alias) else alias
             start = 0
             while True:
-                idx = norm.find(alias, start)
+                idx = haystack.find(needle, start)
                 if idx < 0:
                     break
                 end = idx + len(alias)
