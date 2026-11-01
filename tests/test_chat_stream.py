@@ -4,8 +4,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import contextmanager
-
 import pytest
 
 import config
@@ -313,15 +311,10 @@ def test_stream_limit_uses_pool_size(monkeypatch):
 def test_list_stays_until_done_is_read(monkeypatch):
     from api.chat import _run_stream
 
-    @contextmanager
-    def _no_trace(*_args, **_kwargs):
-        yield None
-
     class Agent:
         def invoke(self, state):
             return {"answer": "固定话术", "session_id": state.get("session_id")}
 
-    monkeypatch.setattr("observability.tracing.trace", _no_trace)
     monkeypatch.setattr("graph.workflow.get_agent", lambda: Agent())
     bus = MemoryBus()
     thread = _run_stream(bus, "sid", {"question": "q", "user_id": "u"}, "q", "u", "sess")

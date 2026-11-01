@@ -32,6 +32,16 @@ class PrefixLoggerFilter(logging.Filter):
         return any(record.name.startswith(prefix) for prefix in self.prefixes)
 
 
+class RidFilter(logging.Filter):
+    """给每条日志补 rid。没有请求上下文时写 '-'，避免格式化把这条日志吞掉。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        from llm.usage import current_rid
+
+        record.rid = current_rid() or "-"
+        return True
+
+
 def _configure_console_encoding() -> None:
     """尽量把控制台输出切换为 UTF-8。"""
 
@@ -108,22 +118,26 @@ def configure_logging() -> None:
     _close_and_remove_handlers(root_logger)
 
     formatter = logging.Formatter(
-        fmt="%(asctime)s %(levelname)s [%(name)s] [pid=%(process)d thread=%(threadName)s] %(message)s",
+        fmt="%(asctime)s %(levelname)s [%(name)s] [pid=%(process)d thread=%(threadName)s rid=%(rid)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    rid_filter = RidFilter()
 
     console_handler = logging.StreamHandler()
     console_handler.setLevel(_log_level())
     console_handler.setFormatter(formatter)
+    console_handler.addFilter(rid_filter)
 
     backend_handler = _make_timed_file_handler(backend_log_path())
     backend_handler.setLevel(_log_level())
     backend_handler.setFormatter(formatter)
+    backend_handler.addFilter(rid_filter)
 
     agent_handler = _make_timed_file_handler(agent_log_path())
     agent_handler.setLevel(_log_level())
     agent_handler.setFormatter(formatter)
     agent_handler.addFilter(PrefixLoggerFilter("agent.run"))
+    agent_handler.addFilter(rid_filter)
 
     root_logger.addHandler(console_handler)
     root_logger.addHandler(backend_handler)

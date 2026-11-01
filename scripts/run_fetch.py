@@ -38,6 +38,30 @@ def _status() -> None:
     print(f"USDA key：{config.FDC_API_KEY[:8]}…  画像模式：{config.FOOD_DRAFT_MODE}")
 
 
+def _configure_fetch_log() -> None:
+    """写 logs/fetch.log，不和 Web 进程共用 backend.log。"""
+    from pathlib import Path
+
+    from utils.logging_config import RidFilter
+
+    path = Path(config.LOG_DIR) / "fetch.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.DEBUG if config.DEBUG else logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] [rid=%(rid)s] %(message)s"
+    )
+    file_handler = logging.FileHandler(path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    file_handler.addFilter(RidFilter())
+    stream = logging.StreamHandler()
+    stream.setFormatter(formatter)
+    stream.addFilter(RidFilter())
+    root.addHandler(file_handler)
+    root.addHandler(stream)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--limit", type=int, default=5, help="本次最多处理几个任务")
@@ -47,10 +71,7 @@ def main() -> int:
     p.add_argument("--status", action="store_true", help="只查看现状")
     args = p.parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG if config.DEBUG else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    _configure_fetch_log()
 
     if args.status:
         _status()

@@ -348,24 +348,41 @@ def test_name_only_blocks_name_and_keeps_description_and_answer():
     assert not any(h.word == "电话" for h in sensitive.scan("联系电话", field_name="note"))
 
 
-def test_redact_trace_keeps_guard_output():
-    from observability.tracing import redact_trace
+def test_redact_trace_keeps_guard_output(schema, monkeypatch):
+    """打码落在 PG 行上：guard 留 output，其它把 output 也换成占位。"""
+    import uuid
 
-    class _Trace:
-        def __init__(self):
-            self.payloads = []
+    import db
 
-        def update(self, **kwargs):
-            self.payloads.append(kwargs)
+    from kg.sensitive import REDACT
+    from llm.usage import bind_identity, record, redact_stored, set_rid
 
-    kept = _Trace()
-    redact_trace(kept, "[内容已过滤]", keep_output=True)
-    assert kept.payloads[0]["input"]["question"] == "[内容已过滤]"
-    assert "output" not in kept.payloads[0]
+    monkeypatch.setattr("config.TRACE_ENABLED", True)
+    rid = uuid.uuid4().hex[:8]
+    set_rid(rid)
+    bind_identity("u-redact", None)
+    record(kind="llm", model="m", input="原问句", output="请尽快就医", purpose_name="answer")
+    redact_stored(rid, keep_output=True)
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT input, output FROM llm_call_log WHERE rid = %s",
+            (rid,),
+        ).fetchone()
+    assert row[0] == REDACT
+    assert "就医" in row[1]
+    assert "原问句" not in row[0]
 
-    wiped = _Trace()
-    redact_trace(wiped, "[内容已过滤]")
-    assert wiped.payloads[0]["output"]["answer"] == "[内容已过滤]"
+    rid2 = uuid.uuid4().hex[:8]
+    set_rid(rid2)
+    record(kind="llm", model="m", input="另一句", output="原文回答", purpose_name="answer")
+    redact_stored(rid2, keep_output=False)
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT input, output FROM llm_call_log WHERE rid = %s",
+            (rid2,),
+        ).fetchone()
+    assert row[0] == REDACT
+    assert row[1] == REDACT
 
 
 @requires_pg

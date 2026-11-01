@@ -4,6 +4,7 @@ nutri_graph —— 食疗养生助手 · 集中配置
 技术栈：LangChain / LangGraph / Milvus / Neo4j / PostgreSQL / DashScope / FastAPI
 设计要点：证据分层（type × level）、图谱约束 LLM、候选表人工确认后幂等写入。
 """
+import json
 import os
 from pathlib import Path
 
@@ -168,12 +169,46 @@ EVIDENCE_POLICY_MAP = {
 }
 
 # ============================================================
-# Langfuse（自托管）
+# 指标、配额、缓存、追踪（v9，新能力默认关，指标除外）
 # ============================================================
-LANGFUSE_ENABLED = os.getenv("LANGFUSE_ENABLED", "true").lower() == "true"
-LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
-LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
-LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+METRICS_ENABLED = os.getenv("METRICS_ENABLED", "true").lower() == "true"
+METRICS_CACHE_TTL_S = int(os.getenv("METRICS_CACHE_TTL_S", "30"))
+HEALTH_CACHE_TTL_S = int(os.getenv("HEALTH_CACHE_TTL_S", "10"))
+RID_ENABLED = os.getenv("RID_ENABLED", "true").lower() == "true"
+CHAT_QUOTA_ENABLED = os.getenv("CHAT_QUOTA_ENABLED", "false").lower() == "true"
+CHAT_QUOTA_PER_USER_DAY = int(os.getenv("CHAT_QUOTA_PER_USER_DAY", "50"))
+CHAT_USAGE_RETENTION_DAYS = int(os.getenv("CHAT_USAGE_RETENTION_DAYS", "90"))
+ANON_ISSUE_PER_IP_DAY = int(os.getenv("ANON_ISSUE_PER_IP_DAY", "20"))
+STREAM_MAX_CONCURRENT = int(os.getenv("STREAM_MAX_CONCURRENT", "8"))
+BG_WORKERS = int(os.getenv("BG_WORKERS", "4"))
+CACHE_ENABLED = os.getenv("CACHE_ENABLED", "false").lower() == "true"
+CACHE_EMBEDDING_TTL_H = int(os.getenv("CACHE_EMBEDDING_TTL_H", "24"))
+CACHE_GRAPH_TTL_S = int(os.getenv("CACHE_GRAPH_TTL_S", "300"))
+SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "data/snapshots")
+TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
+NUTRIENT_DRIFT_PATH = os.getenv("NUTRIENT_DRIFT_PATH", "data/nutrient_drift.json")
+
+
+def _price_map() -> dict[str, tuple[float, float]]:
+    """模型名 → (输入价, 输出价)，单位元/千 token。空映射表示未配置。"""
+    raw = os.getenv("LLM_PRICE_MAP", "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    out: dict[str, tuple[float, float]] = {}
+    if not isinstance(data, dict):
+        return out
+    for name, val in data.items():
+        if not isinstance(val, dict):
+            continue
+        out[str(name)] = (float(val.get("in") or 0), float(val.get("out") or 0))
+    return out
+
+
+LLM_PRICE_MAP = _price_map()
 
 # ============================================================
 # 记忆配置（PostgreSQL）

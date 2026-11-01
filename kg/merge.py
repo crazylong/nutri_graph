@@ -424,6 +424,9 @@ def rollback(batch_id: str) -> int:
             (batch_id,),
         )
     log.info("回滚完成：删除 %d 条边、%d 个本批次新建的节点", n, deleted_nodes)
+    from utils.cache import bump_graph_epoch
+
+    bump_graph_epoch()
     return n
 
 

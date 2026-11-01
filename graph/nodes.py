@@ -49,6 +49,9 @@ def sensitive_guard_node(state: dict) -> dict:
         return {}
 
     log_hits("input", hits, source="chat")
+    from llm.usage import mark_redact
+
+    mark_redact(keep_output=False)
     return {
         "answer": POLITICAL_ANSWER,
         "basis": [],
@@ -117,6 +120,14 @@ def link_node(state: dict) -> dict:
         deduped.append(entity)
 
     near = linker.near_misses(unresolved) if unresolved else []
+    from llm.usage import record
+
+    record(
+        kind="tool",
+        node="link",
+        input=norm,
+        output=str(len(deduped)),
+    )
     return {
         "_entities": [e.__dict__ for e in deduped],
         "_unresolved": unresolved,
@@ -254,6 +265,20 @@ def uncatalogued_node(state: dict) -> dict:
 
 def web_answer_node(state: dict) -> dict:
     """当轮网页参考。登记在 kg.webanswer.answer 里做一次；失败时不重复登记。"""
+    out = _web_answer_node(state)
+    info = out.get("_web_answer") or {}
+    from llm.usage import record
+
+    record(
+        kind="tool",
+        node="web_answer",
+        input=state.get("question") or "",
+        output=f"used={bool(info.get('used'))} n={len(info.get('sources') or [])}",
+    )
+    return out
+
+
+def _web_answer_node(state: dict) -> dict:
     try:
         from kg.webanswer import answer
 
@@ -404,6 +429,10 @@ def graph_query_node(state: dict) -> dict:
     # 搭配问法一条推荐边都没有。后面可以改走网页参考，而不是直接弃答。
     if any(plan.get("intent") == "pair" for plan in plans) and not results:
         out["_web_reason"] = "pair_gap"
+    from llm.usage import record
+
+    cids = ",".join(plan["canonical_id"] for plan in plans)
+    record(kind="tool", node="graph_query", input=cids, output=str(len(results)))
     return out
 
 
@@ -527,6 +556,7 @@ def generate_node(state: dict) -> dict:
             "basis": [],
             "gaps": gaps,
             "confidence": 0.0,
+            "_abstain": True,
         }
 
     # 有图事实：按证据等级分档
@@ -724,6 +754,16 @@ def _profile_llm():
 
 def _write_profile(user_id: str, question: str, answer: str) -> None:
     """后台抽过敏 / 慢病 / 忌口。失败只记日志，不影响已经返回的回答。"""
+    from llm.usage import purpose
+
+    try:
+        with purpose("profile"):
+            _write_profile_body(user_id, question, answer)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("画像抽取失败：%s", exc)
+
+
+def _write_profile_body(user_id: str, question: str, answer: str) -> None:
     try:
         from memory.long_term import UserProfile
 
@@ -736,12 +776,9 @@ def _write_profile(user_id: str, question: str, answer: str) -> None:
 
 
 def _defer_profile(user_id: str, question: str, answer: str) -> None:
-    threading.Thread(
-        target=_write_profile,
-        args=(user_id, question, answer),
-        daemon=True,
-        name="profile-extract",
-    ).start()
+    from utils.spawn import submit_background
+
+    submit_background("profile-extract", _write_profile, user_id, question, answer)
 
 
 def _defer_compress(session_id: str) -> None:
@@ -750,14 +787,19 @@ def _defer_compress(session_id: str) -> None:
         return
 
     def _run():
-        try:
-            from memory.short_term import ShortTermMemory
+        from llm.usage import purpose
 
-            ShortTermMemory().compress_if_needed(session_id)
+        try:
+            with purpose("summary"):
+                from memory.short_term import ShortTermMemory
+
+                ShortTermMemory().compress_if_needed(session_id)
         except Exception as exc:  # noqa: BLE001
             log.warning("滚动摘要失败（不影响回答）：%s", exc)
 
-    threading.Thread(target=_run, daemon=True, name="session-compress").start()
+    from utils.spawn import submit_background
+
+    submit_background("session-compress", _run)
 
 
 # ============================================================
@@ -805,7 +847,7 @@ def memory_write_node(state: dict) -> dict:
 
         user_id = state.get("user_id", "anonymous")
         stm = ShortTermMemory()
-        # 不带 session_id 就新开一会话。不要复用「还没写 ended_at」的旧会话。
+        # /chat 在进图之前已经开好会话。这里的新建只留给没走入口的调用。
         session_id = state.get("session_id") or stm.create_session(user_id)
         try:
             card = answer_card(state)
@@ -833,6 +875,11 @@ def memory_write_node(state: dict) -> dict:
                     kind = "guard"
             except Exception as exc:  # noqa: BLE001
                 log.warning("落库前政治类扫描失败（不打码）：%s", exc)
+
+        if redact:
+            from llm.usage import mark_redact
+
+            mark_redact(keep_output=kind == "guard")
 
         stm.save_round(
             session_id,

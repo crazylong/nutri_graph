@@ -340,15 +340,23 @@ class ModelRouter:
             return [s for s in self.specs if self._states[s.name].status is not ModelStatus.REMOVED]
 
     def reset(self) -> None:
+        """只清可用性。调用次数和 token 累计留下，今日费用以 llm_call_log 为准。"""
         with self._lock:
+            kept = {
+                name: (st.calls, st.prompt_tokens, st.completion_tokens)
+                for name, st in self._states.items()
+            }
             self._states = {s.name: ModelState(name=s.name) for s in self.specs}
+            for name, (calls, pin, pout) in kept.items():
+                st = self._states.get(name)
+                if st is None:
+                    continue
+                st.calls = calls
+                st.prompt_tokens = pin
+                st.completion_tokens = pout
             self._current = None
-            if self._path and self._path.exists():
-                try:
-                    self._path.unlink()
-                except OSError as e:
-                    log.warning("删除状态文件失败：%s", e)
-            log.info("模型池状态已重置（被移除的模型全部回池）")
+            self._save()
+            log.info("模型池可用性已重置，历史 token 累计保留")
 
     # ---------- 观测 ----------
     def snapshot(self) -> dict:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
+import time
 
 log = logging.getLogger("kg.segment")
 
@@ -52,7 +52,24 @@ def _default_llm(question: str) -> str:
         f"{question}"
     )
     chain = pool_chain(temperature=0, max_tokens=120, enable_thinking=False)
+    started = time.perf_counter()
     msg = chain.invoke([HumanMessage(content=prompt)])
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    from llm.middleware import _usage
+    from llm.usage import record
+
+    meta = getattr(msg, "response_metadata", None) or {}
+    pin, pout = _usage(msg if not isinstance(msg, str) else None)
+    record(
+        kind="llm",
+        model=str(meta.get("model_name") or meta.get("model") or ""),
+        input=prompt,
+        output=msg.content if hasattr(msg, "content") else str(msg),
+        prompt_tokens=pin,
+        completion_tokens=pout,
+        latency_ms=latency_ms,
+        purpose_name="segment",
+    )
     return msg.content if hasattr(msg, "content") else str(msg)
 
 
@@ -67,13 +84,17 @@ def extract_foods(question: str, llm=None) -> list[str]:
     holder: dict = {}
 
     def run() -> None:
+        from llm.usage import purpose
+
         try:
-            holder["value"] = caller(question)
+            with purpose("segment"):
+                holder["value"] = caller(question)
         except Exception as exc:  # noqa: BLE001 —— 模型失败不能让 /chat 500
             holder["error"] = exc
 
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
+    from utils.spawn import spawn
+
+    thread = spawn("segment", run)
     thread.join(SPLIT_TIMEOUT_SEC)
     if thread.is_alive():
         log.info("食材识别超时 question=%s terms=[] timeout=true", question)

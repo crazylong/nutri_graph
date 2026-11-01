@@ -229,6 +229,10 @@ def _persist(
         if any(h.action == "block" for h in s_hits):
             raise SensitiveBlocked(s_hits)
 
+    from kg.snapshot import save as save_snapshot
+
+    snapshot_uri, snapshot_sha = save_snapshot(source_key, fdc_id or task["food_key"], detail)
+
     with db.connect() as conn:
         # 重跑覆盖：先删旧 bundle（items 靠外键级联）
         conn.execute("DELETE FROM kg_food_bundle WHERE request_id = %s", (task["request_id"],))
@@ -238,8 +242,9 @@ def _persist(
                 (request_id, food_key, canonical_name, english_name, scientific_name,
                  category, nature, source_key, external_id, source_desc,
                  score_total, score_detail, source_count, sources, hard_veto,
-                 sensitive_hits, sensitive_word_version, status)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                 sensitive_hits, sensitive_word_version, status,
+                 snapshot_uri, snapshot_sha256, fetched_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())
             RETURNING id
             """,
             (
@@ -261,6 +266,8 @@ def _persist(
                 psycopg.types.json.Jsonb(hits_json(s_hits)),
                 current_version(),
                 result.status,
+                snapshot_uri,
+                snapshot_sha,
             ),
         ).fetchone()
         bundle_id = row[0]

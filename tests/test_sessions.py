@@ -60,6 +60,40 @@ def test_new_session_unless_id_is_sent(client, monkeypatch):
     assert all(row["question"] != "没有找到确切依据" for row in recent)
 
 
+def test_first_turn_session_is_bound_before_the_model(client, monkeypatch):
+    """第一轮在进图之前就有会话，模型账上的 session 和响应是同一个。"""
+    import db
+    from llm.usage import record
+
+    seen = {}
+
+    def invoke(state):
+        from graph.nodes import memory_write_node
+
+        seen["session_id"] = state.get("session_id")
+        record(kind="llm", model="m", input="问", output="答", purpose_name="answer")
+        state = {**state, "answer": "好"}
+        return {**state, **memory_write_node(state)}
+
+    class Agent:
+        def invoke(self, state):
+            return invoke(state)
+
+    monkeypatch.setattr("graph.workflow.get_agent", lambda: Agent())
+    headers = bearer(login(client)["access_token"])
+    body = client.post("/chat", json={"question": "第一轮"}, headers=headers)
+    assert body.status_code == 200, body.text
+    sid = body.json()["session_id"]
+    assert sid
+    assert seen["session_id"] == sid
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM llm_call_log WHERE session_id = %s",
+            (sid,),
+        ).fetchone()
+    assert row[0] >= 1
+
+
 def test_foreign_or_unknown_session_is_not_found(client, monkeypatch):
     _install_agent(monkeypatch)
     owner = bearer(login(client)["access_token"])

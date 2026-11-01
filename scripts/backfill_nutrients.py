@@ -249,6 +249,9 @@ def repair_nodes(dry_run: bool = False) -> int:
             (missing,),
         )
     n = merge_mod.merge_nodes()
+    from utils.cache import bump_graph_epoch
+
+    bump_graph_epoch()
     print(f"  merge_nodes 处理 {n} 个")
     as_ing2, _ = graph_cids(missing)
     left = [c for c in missing if c not in as_ing2]
@@ -486,6 +489,9 @@ def main(argv: list[str] | None = None) -> int:
     print("合并进主图…")
     print(f"  节点 {merge_mod.merge_nodes(args.batch)} 个")
     print(f"  边   {merge_mod.merge(args.batch)} 条")
+    from utils.cache import bump_graph_epoch
+
+    bump_graph_epoch()
     return 0
 
 

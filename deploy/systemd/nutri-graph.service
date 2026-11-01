@@ -18,6 +18,8 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 #   并发 10 条在途请求 ≈ 10 条连接，池 10+5=15 里剩下的 5 条留给后台线程
 #   （画像抽取、会话摘要不受这个限制，同样要取连接）。
 #   只改 config 里的 UVICORN_LIMIT_CONCURRENCY 没用，这个值只在这里生效。
+# STREAM_MAX_CONCURRENT（默认 8）是 SSE 工作线程的另一道闸，比这条 limit-concurrency 更窄。
+# 两条是独立的数：先被打满的那条先拒绝。调大其中一条之前先看另一条。
 ExecStart=/opt/envs/nutri/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8810 --proxy-headers --forwarded-allow-ips=127.0.0.1 --workers 1 --limit-concurrency 10
 Restart=always
 RestartSec=3

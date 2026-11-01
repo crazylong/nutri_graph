@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 import config
@@ -350,8 +351,26 @@ def parse_profile_from_answer(dialogue: str, llm) -> dict[str, Any]:
     if llm is None:
         return {}
     prompt = PROFILE_EXTRACT_PROMPT.replace("{dialogue}", dialogue)
+    started = time.perf_counter()
     resp = llm.invoke(prompt)
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    from llm.middleware import _usage
+    from llm.usage import record
+
     content = getattr(resp, "content", resp)
+    text = content if isinstance(content, str) else str(content)
+    meta = getattr(resp, "response_metadata", None) or {}
+    pin, pout = _usage(resp if not isinstance(resp, str) else None)
+    record(
+        kind="llm",
+        model=str(meta.get("model_name") or meta.get("model") or ""),
+        input=prompt,
+        output=text,
+        prompt_tokens=pin,
+        completion_tokens=pout,
+        latency_ms=latency_ms,
+        purpose_name="profile",
+    )
     m = re.search(r"\{.*\}", content, re.DOTALL)
     if not m:
         return {}

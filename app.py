@@ -31,6 +31,8 @@ from api.food_import import router as food_import_router
 from api.health import router as health_router
 from api.history import router as history_router
 from api.kg import router as kg_router
+from api.metrics import router as metrics_router
+from api.rid import RequestIdMiddleware
 from api.system import router as system_router
 from security.sms import describe_config
 from utils.logging_config import configure_logging
@@ -116,9 +118,11 @@ async def _pool_busy_handler(_request, exc: db.PoolBusy):
 
 for _router in (
     auth_router, admin_router, admin_foods_router, admin_import_router, chat_router, history_router,
-    kg_router, food_import_router, health_router, system_router,
+    kg_router, food_import_router, health_router, system_router, metrics_router,
 ):
     app.include_router(_router)
+
+app.add_middleware(RequestIdMiddleware)
 
 
 if __name__ == "__main__":

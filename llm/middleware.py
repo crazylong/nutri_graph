@@ -18,6 +18,7 @@ llm/middleware.py —— 模型调用中间件 `wrap_call_model`
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -84,6 +85,44 @@ def _starved(msg: AIMessage | None) -> str:
     return ""
 
 
+def _prompt_text(request: ModelRequest) -> str:
+    parts: list[str] = []
+    for msg in getattr(request, "messages", None) or []:
+        content = getattr(msg, "content", "")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+    return "\n".join(parts)
+
+
+def _message_text(msg: AIMessage | None) -> str:
+    if msg is None:
+        return ""
+    content = getattr(msg, "content", "")
+    return content if isinstance(content, str) else str(content or "")
+
+
+def _ledger(spec: ModelSpec, msg: AIMessage | None, *, prompt: str, latency_ms: int, ok: bool) -> None:
+    from llm.usage import record
+
+    pin, pout = _usage(msg)
+    record(
+        kind="llm",
+        model=spec.name,
+        input=prompt,
+        output=_message_text(msg),
+        prompt_tokens=pin,
+        completion_tokens=pout,
+        latency_ms=latency_ms,
+        ok=ok,
+    )
+
+
 def params_from(temperature=None, max_tokens=None) -> dict[str, Any]:
     """流式没有 ModelRequest，只传温度和 max_tokens。空值走 config 默认。"""
     return {"temperature": temperature, "max_tokens": max_tokens}
@@ -135,8 +174,9 @@ class _Plan:
     def budget(self, spec: ModelSpec) -> int:
         return int(self.params.get("max_tokens") or config.LLM_MAX_TOKENS)
 
-    def on_error(self, spec: ModelSpec, exc: BaseException) -> bool:
+    def on_error(self, spec: ModelSpec, exc: BaseException, *, prompt: str = "", latency_ms: int = 0) -> bool:
         """记一次失败。返回 True 表示可以换下一个；False 表示换也没用（需原样抛出）。"""
+        _ledger(spec, None, prompt=prompt, latency_ms=latency_ms, ok=False)
         kind, reason = classify_error(exc)
         if not kind.switchable:
             return False
@@ -149,13 +189,15 @@ class _Plan:
         log.warning("模型 %s 不可用（%s），切下一个", spec.name, kind.value)
         return True
 
-    def on_starved(self, spec: ModelSpec, why: str) -> None:
+    def on_starved(self, spec: ModelSpec, why: str, *, msg: AIMessage | None = None, prompt: str = "", latency_ms: int = 0) -> None:
         # 调用方预算不足，不是模型坏了：不动池状态，否则一次小预算请求会连累所有调用
+        _ledger(spec, msg, prompt=prompt, latency_ms=latency_ms, ok=False)
         self.starved.append(spec.name)
         self.errors.append(f"{spec.name}(empty)")
         log.warning("模型 %s %s，切下一个", spec.name, why)
 
-    def on_success(self, spec: ModelSpec, msg: AIMessage | None, resp: Any) -> Any:
+    def on_success(self, spec: ModelSpec, msg: AIMessage | None, resp: Any, *, prompt: str = "", latency_ms: int = 0) -> Any:
+        _ledger(spec, msg, prompt=prompt, latency_ms=latency_ms, ok=True)
         if in_pool(spec.name):
             get_router().mark_success(spec, *_usage(msg))
         if msg is not None and isinstance(getattr(msg, "response_metadata", None), dict):
@@ -194,8 +236,10 @@ class WrapCallModelMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> Any:
         plan = _Plan(_model_params(request))
+        prompt = _prompt_text(request)
         for spec in plan.order():
             budget = plan.budget(spec)
+            t0 = time.perf_counter()
             try:
                 resp = handler(request.override(model=plan.model_for(spec)))
                 msg = _first_message(resp)
@@ -205,14 +249,16 @@ class WrapCallModelMiddleware(AgentMiddleware):
                     log.info("模型 %s 空回复（%s），max_tokens %d → %d 重试", spec.name, why, budget, bumped)
                     resp = handler(request.override(model=plan.model_for(spec, max_tokens=bumped)))
                     msg, why = _first_message(resp), _starved(_first_message(resp))
+                latency_ms = int((time.perf_counter() - t0) * 1000)
                 if why:
-                    plan.on_starved(spec, why)
+                    plan.on_starved(spec, why, msg=msg, prompt=prompt, latency_ms=latency_ms)
                     continue
             except Exception as exc:  # noqa: BLE001
-                if not plan.on_error(spec, exc):
+                latency_ms = int((time.perf_counter() - t0) * 1000)
+                if not plan.on_error(spec, exc, prompt=prompt, latency_ms=latency_ms):
                     raise
                 continue
-            return plan.on_success(spec, msg, resp)
+            return plan.on_success(spec, msg, resp, prompt=prompt, latency_ms=latency_ms)
 
         raise plan.exhausted()
 
@@ -222,8 +268,10 @@ class WrapCallModelMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Any],
     ) -> Any:
         plan = _Plan(_model_params(request))
+        prompt = _prompt_text(request)
         for spec in plan.order():
             budget = plan.budget(spec)
+            t0 = time.perf_counter()
             try:
                 resp = await handler(request.override(model=plan.model_for(spec)))
                 msg = _first_message(resp)
@@ -234,14 +282,16 @@ class WrapCallModelMiddleware(AgentMiddleware):
                     resp = await handler(request.override(model=plan.model_for(spec, max_tokens=bumped)))
                     msg = _first_message(resp)
                     why = _starved(msg)
+                latency_ms = int((time.perf_counter() - t0) * 1000)
                 if why:
-                    plan.on_starved(spec, why)
+                    plan.on_starved(spec, why, msg=msg, prompt=prompt, latency_ms=latency_ms)
                     continue
             except Exception as exc:  # noqa: BLE001
-                if not plan.on_error(spec, exc):
+                latency_ms = int((time.perf_counter() - t0) * 1000)
+                if not plan.on_error(spec, exc, prompt=prompt, latency_ms=latency_ms):
                     raise
                 continue
-            return plan.on_success(spec, msg, resp)
+            return plan.on_success(spec, msg, resp, prompt=prompt, latency_ms=latency_ms)
 
         raise plan.exhausted()
 

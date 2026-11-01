@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import logging
-from contextlib import contextmanager
-
 import psycopg
 import pytest
 
@@ -216,12 +214,7 @@ def test_admin_sms_list(client):
 
 
 def test_stream_requires_redis_but_sync_does_not(client, monkeypatch):
-    @contextmanager
-    def _no_trace(*_args, **_kwargs):
-        yield None
-
     monkeypatch.setattr("chatbus.open_bus", lambda: None)
-    monkeypatch.setattr("observability.tracing.trace", _no_trace)
 
     class Agent:
         def invoke(self, state):

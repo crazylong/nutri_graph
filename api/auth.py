@@ -357,12 +357,23 @@ def logout(req: LogoutRequest):
 # 匿名身份
 # ============================================================
 @router.post("/anon")
-def create_anon():
+def create_anon(request: Request):
     """领取匿名身份：未登录也能聊天，登录时用 anon_token 把数据带过去。
 
     必须由服务端签发 —— 若让前端自己传一个 id，任何人填别人的 id
     就能把他的过敏史和聊天记录并进自己的账号。
+    同一真实 IP 每天有上限，避免换号把用户配额绕开。
     """
+    from api.deps import client_ip
+    from security.quota import charge_anon
+    from utils.clock import seconds_until_midnight
+
+    if not charge_anon(client_ip(request)):
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "anon_limit_exceeded", "message": "今日匿名身份领取次数已用完"},
+            headers={"Retry-After": str(seconds_until_midnight())},
+        )
     return make_anon()
 
 

@@ -743,4 +743,7 @@ def merge_pending(
                 (bundle_id,),
             )
 
+    from utils.cache import bump_graph_epoch
+
+    bump_graph_epoch()
     return {"nodes": nodes, "edges": edges, "aliases": alias_report}

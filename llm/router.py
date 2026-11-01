@@ -247,7 +247,19 @@ def probe_model(
             router.mark_failure(spec, kind, reason)
         return False, f"{kind.value}: {reason}"
     if mark:
-        router.mark_success(spec, *_usage(resp))
+        pin, pout = _usage(resp)
+        router.mark_success(spec, pin, pout)
+        from llm.usage import record
+
+        record(
+            kind="llm",
+            model=spec.name,
+            input=prompt,
+            output=getattr(resp, "content", "") or "",
+            prompt_tokens=pin,
+            completion_tokens=pout,
+            purpose_name="probe",
+        )
     text = (getattr(resp, "content", "") or "").strip().replace("\n", " ")
     return True, f"ok  tokens={_usage(resp)[0]}/{_usage(resp)[1]}  content={text[:30]!r}"
 

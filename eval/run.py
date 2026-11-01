@@ -44,7 +44,38 @@ def get_evaluator():
 
     if not config.DASHSCOPE_API_KEY:
         return None, get_embeddings()
-    return primary_model(max_tokens=config.LLM_MAX_TOKENS_CEILING), get_embeddings()
+    model = primary_model(max_tokens=config.LLM_MAX_TOKENS_CEILING)
+    return _recording(model), get_embeddings()
+
+
+def _recording(model):
+    """评估不走中间件，在 invoke 上补一笔记账。"""
+    import time
+
+    from llm.middleware import _usage
+    from llm.usage import purpose, record
+
+    original = model.invoke
+
+    def invoke(*args, **kwargs):
+        t0 = time.perf_counter()
+        with purpose("eval"):
+            resp = original(*args, **kwargs)
+            pin, pout = _usage(resp)
+            record(
+                kind="llm",
+                model=getattr(model, "model_name", "") or getattr(model, "model", "") or "",
+                input=str(args[0]) if args else "",
+                output=getattr(resp, "content", "") or "",
+                prompt_tokens=pin,
+                completion_tokens=pout,
+                latency_ms=int((time.perf_counter() - t0) * 1000),
+                purpose_name="eval",
+            )
+        return resp
+
+    model.invoke = invoke
+    return model
 
 
 def fill_by_chain(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

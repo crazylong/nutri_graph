@@ -44,9 +44,6 @@ dashscope>=2.0.1,<3.0.0
 # 不要装 zai==0.0.2，那是另一个包。
 zai-sdk>=0.2.2,<0.3.0
 
-# Observability
-langfuse>=3.0.0,<4.0.0
-
 # Evaluation
 ragas>=0.3.0
 datasets>=3.0.0

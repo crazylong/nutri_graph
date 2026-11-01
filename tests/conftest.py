@@ -29,6 +29,8 @@ os.environ.setdefault("SMS_MAX_PER_DEVICE_DAY", "1000")
 os.environ.setdefault("SMS_MAX_GLOBAL_DAY", "10000")
 # 图形验证码：基线放宽到「几乎永不触发」，图形码用例自己用 monkeypatch 收紧
 os.environ.setdefault("CAPTCHA_FREE_SENDS_PER_IP", "100000")
+# 匿名领号日上限在生产是 20。测试会反复领号，这里放宽，限额用例自己收紧。
+os.environ.setdefault("ANON_ISSUE_PER_IP_DAY", "100000")
 # 测试用固定密钥：真实密钥只存在于 .env（.env 不存在时也能跑）
 os.environ.setdefault("JWT_SECRET", "test-only-secret-0123456789abcdef0123456789abcdef")
 os.environ.setdefault("PHONE_HASH_PEPPER", "test-only-pepper")

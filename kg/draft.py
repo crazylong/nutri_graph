@@ -169,8 +169,10 @@ def _as_list(value) -> list[str]:
 def extract_llm(food: str) -> FoodDraft:
     """调模型生成画像。模型不可用或输出不合规都抛 DraftError，由上层把任务标失败。"""
     from llm import invoke_model
+    from llm.usage import purpose
 
-    resp = invoke_model(_PROMPT.format(food=food))
+    with purpose("draft"):
+        resp = invoke_model(_PROMPT.format(food=food))
     data = _parse_json(getattr(resp, "content", resp))
 
     identity = _as_list(data.get("identity_keywords"))

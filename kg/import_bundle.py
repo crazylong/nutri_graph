@@ -131,6 +131,11 @@ def _stage_one(
     ).fetchone()
 
     aliases = list(payload.get("aliases") or [])
+    from kg.snapshot import save as save_snapshot
+
+    snapshot_uri, snapshot_sha = save_snapshot(
+        source_key, f"{job_id}-r{row_no}", payload,
+    )
     sources = Jsonb(_sources(payload, job_id, filename, row_no))
     detail = Jsonb(
         {
@@ -151,7 +156,8 @@ def _stage_one(
             "  score_total = %s, score_detail = %s, source_count = 1, sources = %s, "
             "  hard_veto = '', status = 'pending_review', evidence_type = 'measured', "
             "  reviewer = '', reviewed_at = NULL, reject_reason = '', "
-            "  request_id = COALESCE(%s, request_id) "
+            "  request_id = COALESCE(%s, request_id), "
+            "  snapshot_uri = %s, snapshot_sha256 = %s, fetched_at = now() "
             "WHERE id = %s",
             (
                 name,
@@ -166,6 +172,8 @@ def _stage_one(
                 detail,
                 sources,
                 request_id,
+                snapshot_uri,
+                snapshot_sha,
                 bundle_id,
             ),
         )
@@ -177,9 +185,9 @@ def _stage_one(
             "  (request_id, food_key, canonical_name, english_name, scientific_name, "
             "   category, nature, aliases, source_key, external_id, source_desc, "
             "   score_total, score_detail, source_count, sources, hard_veto, status, "
-            "   evidence_type) "
+            "   evidence_type, snapshot_uri, snapshot_sha256, fetched_at) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,'','pending_review',"
-            "        'measured') "
+            "        'measured', %s, %s, now()) "
             "RETURNING id",
             (
                 request_id,
@@ -196,6 +204,8 @@ def _stage_one(
                 IMPORT_SCORE,
                 detail,
                 sources,
+                snapshot_uri,
+                snapshot_sha,
             ),
         ).fetchone()[0]
 

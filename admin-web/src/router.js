@@ -12,6 +12,7 @@ import ImportJobs from './views/ImportJobs.vue'
 import Foods from './views/Foods.vue'
 import FoodDetail from './views/FoodDetail.vue'
 import SmsLogs from './views/SmsLogs.vue'
+import Trace from './views/Trace.vue'
 import { tokens } from './api'
 
 const router = createRouter({
@@ -24,6 +25,7 @@ const router = createRouter({
       children: [
         { path: '', redirect: '/overview' },
         { path: 'overview', component: Overview },
+        { path: 'trace', component: Trace },
         { path: 'requests', component: Requests },
         { path: 'bundles', component: Bundles },
         { path: 'bundles/:id', component: BundleDetail },

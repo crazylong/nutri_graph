@@ -17,9 +17,22 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 import config
 from api.deps import get_principal, require_user_when_enforced
+from api.metrics import note
+from utils.clock import seconds_until_midnight
 
 router = APIRouter(tags=["chat"])
 log = logging.getLogger("api.chat")
+_stream_slots: threading.Semaphore | None = None
+_stream_slots_n: int | None = None
+
+
+def _slots() -> threading.Semaphore:
+    global _stream_slots, _stream_slots_n
+    n = max(int(config.STREAM_MAX_CONCURRENT), 1)
+    if _stream_slots is None or _stream_slots_n != n:
+        _stream_slots = threading.Semaphore(n)
+        _stream_slots_n = n
+    return _stream_slots
 
 
 def _facts(result: dict) -> list[dict]:
@@ -62,14 +75,38 @@ def _prepare(payload: dict, who: dict | None):
     user_id = who["user_id"] if who else payload.get("user_id", "anonymous")
     if not question:
         return None, JSONResponse(status_code=400, content={"error": "question 不能为空"})
-    if session_id is not None:
-        from memory.short_term import ShortTermMemory
+    from memory.short_term import ShortTermMemory
 
-        if not ShortTermMemory().owns(user_id, session_id):
+    memory = ShortTermMemory()
+    if session_id is not None:
+        if not memory.owns(user_id, session_id):
             raise HTTPException(
                 status_code=404,
                 detail={"code": "session_not_found", "message": "会话不存在"},
             )
+    if config.CHAT_QUOTA_ENABLED:
+        if who is None:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "unauthorized", "message": "请先领取身份后再提问"},
+            )
+        if who.get("role") != "admin":
+            from security.quota import charge_chat
+
+            if not charge_chat(user_id):
+                raise HTTPException(
+                    status_code=429,
+                    detail={"code": "quota_exceeded", "message": "今日提问次数已用完"},
+                    headers={"Retry-After": str(seconds_until_midnight())},
+                )
+    if session_id is None and config.MEMORY_ENABLED:
+        try:
+            session_id = memory.create_session(user_id)
+        except Exception:
+            log.warning("开会话失败，这次调用先不带 session", exc_info=True)
+    from llm.usage import bind_identity
+
+    bind_identity(user_id, session_id)
     raw_consent = payload.get("consent", None)
     state = {
         "question": question,
@@ -82,30 +119,23 @@ def _prepare(payload: dict, who: dict | None):
 
 def _invoke(state: dict, question: str, user_id: str) -> dict:
     from graph.workflow import get_agent
-    from observability.tracing import record_result, redact_trace, trace
+    from llm.usage import current_rid, purpose, redact_stored, span
 
-    t0 = time.time()
-    with trace(question, user_id) as tr:
-        result = get_agent().invoke(state)
-        elapsed_ms = (time.time() - t0) * 1000
-        if tr is not None:
-            record_result(
-                tr,
-                answer=result.get("answer", ""),
-                evidence_counts=result.get("_evidence_counts", {}),
-                graph_hit=result.get("_graph_hit", False),
-                degraded=result.get("_degraded", False),
-                elapsed_ms=elapsed_ms,
-                web_used=bool((result.get("_web_answer") or {}).get("used")),
-            )
-        if tr is not None and result.get("_redact"):
-            from kg.sensitive import REDACT
-
-            redact_trace(
-                tr,
-                REDACT,
-                keep_output=result.get("_redacted_kind") == "guard",
-            )
+    t0 = time.perf_counter()
+    with purpose("answer"):
+        with span("node", "chat", input=question) as box:
+            result = get_agent().invoke(state)
+            box.output = result.get("answer") or ""
+    if result.get("_redact"):
+        redact_stored(current_rid(), keep_output=result.get("_redacted_kind") == "guard")
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    if result.get("_abstain"):
+        status = "abstain"
+    elif result.get("_degraded"):
+        status = "degraded"
+    else:
+        status = "ok"
+    note(status, bool(result.get("_graph_hit")), elapsed_ms)
     return result
 
 
@@ -116,11 +146,15 @@ def chat(payload: dict, who: dict | None = Depends(get_principal)):
     if error is not None:
         return error
     state, question, user_id, session_id = prepared
-    result = _invoke(state, question, user_id)
+    try:
+        result = _invoke(state, question, user_id)
+    except Exception:
+        note("error", False, 0)
+        raise
     return chat_payload(result, session_id)
 
 
-def _run_stream(bus, stream_id: str, state: dict, question: str, user_id: str, session_id):
+def _run_stream(bus, stream_id: str, state: dict, question: str, user_id: str, session_id, *, release_slot: bool = False):
     from graph.live import Live
     from llm.streamctx import ModelStreamBroken, StreamCancelled, bind
 
@@ -131,33 +165,39 @@ def _run_stream(bus, stream_id: str, state: dict, question: str, user_id: str, s
 
     def work():
         try:
-            with bind(live):
-                live.status("正在查找")
-                result = _invoke(state, question, user_id)
-                if not live.sent_text and result.get("answer"):
-                    live.text_delta(result["answer"])
-                live.result(chat_payload(result, session_id))
-                live.finish_stream()
-        except (StreamCancelled, ModelStreamBroken) as exc:
-            log.info("流式中断：%s", exc)
+            try:
+                with bind(live):
+                    live.status("正在查找")
+                    result = _invoke(state, question, user_id)
+                    if not live.sent_text and result.get("answer"):
+                        live.text_delta(result["answer"])
+                    live.result(chat_payload(result, session_id))
+                    live.finish_stream()
+            except (StreamCancelled, ModelStreamBroken) as exc:
+                log.info("流式中断：%s", exc)
+                note("error", False, 0)
+                if not live.done:
+                    live.error("生成中断")
+                    live.finish_stream()
+            except Exception as exc:  # noqa: BLE001
+                log.exception("流式生成失败：%s", exc)
+                note("error", False, 0)
+                if not live.done:
+                    live.error("生成失败")
+                    live.finish_stream()
             if not live.done:
-                live.error("生成中断")
-                live.finish_stream()
-        except Exception as exc:  # noqa: BLE001
-            log.exception("流式生成失败：%s", exc)
-            if not live.done:
-                live.error("生成失败")
-                live.finish_stream()
-        if not live.done:
-            ok = bus.push(stream_id, "error", {"text": "生成失败"}) and bus.push(
-                stream_id, "done", {},
-            )
-            if not ok and not live.ever_ok:
-                bus.delete(stream_id)
+                ok = bus.push(stream_id, "error", {"text": "生成失败"}) and bus.push(
+                    stream_id, "done", {},
+                )
+                if not ok and not live.ever_ok:
+                    bus.delete(stream_id)
+        finally:
+            if release_slot:
+                _slots().release()
 
-    thread = threading.Thread(target=work, name=f"chat-{stream_id[:8]}", daemon=True)
-    thread.start()
-    return thread
+    from utils.spawn import spawn
+
+    return spawn(f"chat-{stream_id[:8]}", work)
 
 
 @router.post("/chat/stream")
@@ -172,8 +212,18 @@ def chat_stream(payload: dict, who: dict | None = Depends(get_principal)):
     if bus is None:
         return JSONResponse(status_code=503, content={"error": "流式通道不可用"})
     state, question, user_id, session_id = prepared
+    slots = _slots()
+    if not slots.acquire(blocking=False):
+        return JSONResponse(
+            status_code=503,
+            content={"detail": {"code": "stream_busy", "message": "当前回答过多，请稍后再试"}},
+        )
     stream_id = uuid.uuid4().hex
-    _run_stream(bus, stream_id, state, question, user_id, session_id)
+    try:
+        _run_stream(bus, stream_id, state, question, user_id, session_id, release_slot=True)
+    except Exception:
+        slots.release()
+        raise
     deadline = time.monotonic() + stream_limit_seconds()
     return StreamingResponse(
         iter_sse(bus, stream_id, deadline),

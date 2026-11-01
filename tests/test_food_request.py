@@ -251,12 +251,14 @@ def test_api_submit_and_query(client):
     assert r.status_code == 404
 
 
-def test_chat_routes_unknown_food_to_uncatalogued(client):
+def test_chat_routes_unknown_food_to_uncatalogued(client, monkeypatch):
     """整条链路：/chat 问一个不在图谱里的食材 → 走 uncatalogued 分支并登记。
 
     用「火龙果」而不是「黑豆」：前面的用例往 dict_alias 里插了「黑豆」别名，
     如果这里再用黑豆就会命中 Ingredient 分支、去连 Neo4j。
+    服务器上网页参考是开着的，不关掉就会走 web_answer，话术不再是「暂未收录」。
     """
+    monkeypatch.setattr(config, "WEB_SEARCH_ENABLED", False)
     _reset_request_table()
     r = client.post("/chat", json={"question": "火龙果和什么一起吃好？"})
     assert r.status_code == 200, r.text

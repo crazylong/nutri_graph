@@ -6,6 +6,16 @@
       <el-col :span="8"><el-card><div class="n">{{ pendingBundles }}</div><div>待审补录</div></el-card></el-col>
       <el-col :span="8"><el-card><div class="n">{{ requestSummary }}</div><div>未收录各状态</div></el-card></el-col>
     </el-row>
+    <el-row :gutter="12" style="margin-top: 12px">
+      <el-col :span="8"><el-card><div class="n">{{ todayCalls }}</div><div>今日模型调用</div></el-card></el-col>
+      <el-col :span="8"><el-card><div class="n">{{ todayTokens }}</div><div>今日 token</div></el-card></el-col>
+      <el-col :span="8"><el-card><div class="n">{{ todayCost }}</div><div>今日费用（元）</div></el-card></el-col>
+    </el-row>
+    <el-table v-if="topUsers.length" :data="topUsers" size="small" style="margin-top: 12px">
+      <el-table-column prop="user_id" label="用户" />
+      <el-table-column prop="cost" label="估算费用" width="120" />
+      <el-table-column prop="tokens" label="token" width="120" />
+    </el-table>
     <p v-if="error" class="err">{{ error }}</p>
   </div>
 </template>
@@ -19,6 +29,10 @@ const error = ref('')
 const stats = ref(null)
 const users = computed(() => stats.value?.users?.active ?? '—')
 const pendingBundles = computed(() => stats.value?.kg?.pending_bundles ?? '—')
+const todayCalls = computed(() => stats.value?.today_calls ?? '—')
+const todayTokens = computed(() => stats.value?.today_tokens ?? '—')
+const todayCost = computed(() => stats.value?.today_cost ?? '—')
+const topUsers = computed(() => stats.value?.top_users || [])
 const requestSummary = computed(() => {
   const rows = stats.value?.kg?.food_requests
   if (!rows) return '—'

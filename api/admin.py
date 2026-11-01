@@ -102,6 +102,8 @@ def stats():
             cur.execute("SELECT count(*) FROM kg_food_bundle WHERE status = 'pending_review'")
             pending_bundles = cur.fetchone()[0]
 
+        usage = _usage_today(conn)
+
     active = users.get("active", 0)
     return {
         "users": {
@@ -121,6 +123,270 @@ def stats():
             "pending_bundles": pending_bundles,
             "food_requests": food_requests,
         },
+        "today_calls": usage["today_calls"],
+        "today_tokens": usage["today_tokens"],
+        "today_cost": usage["today_cost"],
+        "top_users": usage["top_users"],
+    }
+
+
+def _usage_today(conn) -> dict:
+    """只统计 kind=llm。缺表时字段留空，不让整页 503。"""
+    empty = {"today_calls": None, "today_tokens": None, "today_cost": None, "top_users": None}
+    if not _table_exists(conn, "llm_call_log"):
+        return empty
+    from utils.clock import day_bounds
+    from llm.usage import price_yuan
+
+    start, end = day_bounds()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT model, count(*),
+               coalesce(sum(prompt_tokens), 0), coalesce(sum(completion_tokens), 0)
+        FROM llm_call_log
+        WHERE kind = 'llm' AND ts >= %s AND ts < %s
+        GROUP BY model
+        """,
+        (start, end),
+    )
+    calls = tokens = 0
+    cost = 0.0
+    for model, n, pin, pout in cur.fetchall():
+        calls += int(n)
+        tokens += int(pin) + int(pout)
+        cost += price_yuan(model or "", int(pin), int(pout))
+    cur.execute(
+        """
+        SELECT user_id, model,
+               coalesce(sum(prompt_tokens), 0), coalesce(sum(completion_tokens), 0)
+        FROM llm_call_log
+        WHERE kind = 'llm' AND ts >= %s AND ts < %s AND user_id <> ''
+        GROUP BY user_id, model
+        """,
+        (start, end),
+    )
+    by_user: dict[str, dict] = {}
+    for user_id, model, pin, pout in cur.fetchall():
+        slot = by_user.setdefault(user_id, {"user_id": user_id, "tokens": 0, "cost": 0.0})
+        slot["tokens"] += int(pin) + int(pout)
+        slot["cost"] += price_yuan(model or "", int(pin), int(pout))
+    top = sorted(by_user.values(), key=lambda item: item["cost"], reverse=True)[:10]
+    for item in top:
+        item["cost"] = round(item["cost"], 4)
+    return {
+        "today_calls": calls,
+        "today_tokens": tokens,
+        "today_cost": round(cost, 4),
+        "top_users": top,
+    }
+
+
+def _span_tree(rows: list[dict]) -> list[dict]:
+    by_parent: dict[str, list[dict]] = {}
+    known: set[str] = set()
+    for row in rows:
+        row["children"] = []
+        known.add(row.get("span_id") or "")
+        by_parent.setdefault(row.get("parent_span_id") or "", []).append(row)
+
+    def nest(parent: str) -> list[dict]:
+        kids = by_parent.get(parent, [])
+        for kid in kids:
+            kid["children"] = nest(kid.get("span_id") or "")
+        return kids
+
+    # 节点 span 在 TRACE_ENABLED 关闭时不落库，llm span 仍记着那个父 id。
+    # 父级不在这批结果里时，把这些 span 提为根，否则展开是一棵空树。
+    roots = list(nest(""))
+    for parent in by_parent:
+        if parent and parent not in known:
+            roots.extend(nest(parent))
+    return roots
+
+
+@router.get("/trace")
+def trace_detail(rid: str = Query("")):
+    rid = rid.strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail={"code": "bad_rid", "message": "缺少 rid"})
+    with db.connect() as conn:
+        if not _table_exists(conn, "llm_call_log"):
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "table_missing", "message": f"llm_call_log 表不存在，{_MISSING_TABLE_HINT}"},
+            )
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT span_id, parent_span_id, kind, node, model, purpose, input, output,
+                   prompt_tokens, completion_tokens, latency_ms, ok, ts
+            FROM llm_call_log WHERE rid = %s ORDER BY id
+            """,
+            (rid,),
+        )
+        cols = [d[0] for d in cur.description]
+        rows = []
+        for raw in cur.fetchall():
+            item = dict(zip(cols, raw))
+            if item.get("ts") is not None:
+                item["ts"] = item["ts"].isoformat()
+            rows.append(item)
+    return {"rid": rid, "spans": _span_tree(rows)}
+
+
+@router.get("/trace/sessions")
+def trace_sessions(session_id: str = Query("")):
+    session_id = session_id.strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail={"code": "bad_session", "message": "缺少 session_id"})
+    with db.connect() as conn:
+        if not _table_exists(conn, "llm_call_log"):
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "table_missing", "message": f"llm_call_log 表不存在，{_MISSING_TABLE_HINT}"},
+            )
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT rid, min(ts) AS started_at, count(*) AS spans
+            FROM llm_call_log
+            WHERE session_id = %s
+            GROUP BY rid
+            ORDER BY min(ts) DESC
+            LIMIT 50
+            """,
+            (session_id,),
+        )
+        turns = [
+            {"rid": rid, "started_at": started.isoformat() if started else "", "spans": int(n)}
+            for rid, started, n in cur.fetchall()
+        ]
+    return {"session_id": session_id, "turns": turns}
+
+
+_TRACE_PAGE = 50
+
+
+@router.get("/trace/recent")
+def trace_recent(phone: str = Query("")):
+    """最近的调用，按这一次请求里最晚的 span 倒序。手机号可选，用来收窄到某一个用户。"""
+    from api.auth import _require_valid_phone
+    from security.crypto import phone_hash, phone_mask
+
+    phone = phone.strip()
+    mask = ""
+    user_id = ""
+    with db.connect() as conn:
+        if not _table_exists(conn, "llm_call_log"):
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "table_missing", "message": f"llm_call_log 表不存在，{_MISSING_TABLE_HINT}"},
+            )
+        if phone:
+            valid = _require_valid_phone(phone)
+            mask = phone_mask(valid)
+            row = conn.execute(
+                "SELECT user_id::text FROM app_user WHERE phone_hash = %s",
+                (phone_hash(valid),),
+            ).fetchone()
+            if row is None:
+                return {"phone_mask": mask, "turns": []}
+            user_id = row[0]
+        user_clause = "AND user_id = %s" if user_id else ""
+        args: list = [user_id, user_id, _TRACE_PAGE] if user_id else [_TRACE_PAGE]
+        cur = conn.cursor()
+        # rid 为空的是没挂上请求的单次调用，不能并成一行。
+        cur.execute(
+            f"""
+            SELECT rid, latest_at, spans, user_id, session_id
+            FROM (
+                SELECT rid,
+                       max(ts) AS latest_at,
+                       count(*) AS spans,
+                       max(nullif(user_id, '')) AS user_id,
+                       max(session_id) AS session_id
+                FROM llm_call_log
+                WHERE rid <> '' {user_clause}
+                GROUP BY rid
+                UNION ALL
+                SELECT '' AS rid,
+                       ts AS latest_at,
+                       1 AS spans,
+                       nullif(user_id, '') AS user_id,
+                       session_id
+                FROM llm_call_log
+                WHERE rid = '' {user_clause}
+            ) recent
+            ORDER BY latest_at DESC, rid DESC
+            LIMIT %s
+            """,
+            args,
+        )
+        grouped = cur.fetchall()
+        ids = sorted({uid for _, _, _, uid, _ in grouped if uid})
+        masks: dict[str, str] = {}
+        if ids:
+            cur.execute(
+                "SELECT user_id::text, phone_mask FROM app_user WHERE user_id::text = ANY(%s)",
+                (ids,),
+            )
+            masks = {uid: shown or "" for uid, shown in cur.fetchall()}
+    turns = [
+        {
+            "rid": rid,
+            "latest_at": latest.isoformat() if latest else "",
+            "spans": int(n),
+            "session_id": session or "",
+            "phone_mask": masks.get(uid or "", ""),
+        }
+        for rid, latest, n, uid, session in grouped
+    ]
+    return {"phone_mask": mask, "turns": turns}
+
+
+@router.get("/kg/bundles/{bundle_id}/snapshot")
+def bundle_snapshot(bundle_id: int):
+    import hashlib
+    import json
+
+    with db.connect() as conn:
+        if not _table_exists(conn, "kg_food_bundle"):
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "table_missing", "message": f"kg_food_bundle 表不存在，{_MISSING_TABLE_HINT}"},
+            )
+        row = conn.execute(
+            "SELECT snapshot_uri, snapshot_sha256 FROM kg_food_bundle WHERE id = %s",
+            (bundle_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "没有这份补录"})
+    uri, stored = row
+    if not uri:
+        raise HTTPException(status_code=404, detail={"code": "snapshot_missing", "message": "这份补录没有快照"})
+    root = Path(config.SNAPSHOT_DIR)
+    if not root.is_absolute():
+        root = _ROOT / root
+    path = Path(uri).resolve()
+    root = root.resolve()
+    if root != path and root not in path.parents:
+        raise HTTPException(status_code=400, detail={"code": "snapshot_path", "message": "快照路径不在快照目录里"})
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail={"code": "snapshot_missing", "message": "快照文件不在了"})
+    body = path.read_bytes()
+    digest = hashlib.sha256(body).hexdigest()
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except json.JSONDecodeError:
+        payload = {"raw": body.decode("utf-8", errors="replace")}
+    mismatch = bool(stored) and digest != stored
+    return {
+        "code": "snapshot_mismatch" if mismatch else "ok",
+        "sha256": digest,
+        "stored_sha256": stored or "",
+        "match": not mismatch,
+        "raw": payload,
     }
 
 

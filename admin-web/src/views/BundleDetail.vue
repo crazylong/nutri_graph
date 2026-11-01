@@ -47,6 +47,7 @@
         <el-checkbox v-model="confirmed">我已逐条看过上面的命中，确认可以入库</el-checkbox>
       </div>
       <div class="actions">
+        <el-button :loading="snapBusy" @click="openSnapshot">查看原始快照</el-button>
         <el-input v-model="reason" placeholder="驳回理由，可空" />
         <el-button
           type="primary"
@@ -57,6 +58,7 @@
         >通过并合并</el-button>
         <el-button type="danger" :loading="busy" @click="reject">驳回</el-button>
       </div>
+      <pre v-if="snapshot" class="snap">{{ snapshot }}</pre>
     </template>
   </div>
 </template>
@@ -74,6 +76,8 @@ const loading = ref(true)
 const busy = ref(false)
 const reason = ref('')
 const confirmed = ref(false)
+const snapBusy = ref(false)
+const snapshot = ref('')
 
 const CATEGORY_LABEL = {
   political: '政治',
@@ -127,6 +131,20 @@ async function load() {
   reason.value = body.reject_reason || ''
 }
 
+async function openSnapshot() {
+  snapBusy.value = true
+  snapshot.value = ''
+  const response = await api('/admin/kg/bundles/' + route.params.id + '/snapshot')
+  const body = await readJson(response)
+  snapBusy.value = false
+  if (!response.ok) {
+    ElMessage.error(errorMessage(body, '快照打不开'))
+    return
+  }
+  const mark = body.match ? '' : '\n（sha256 与库里记下的不一致）\n'
+  snapshot.value = mark + JSON.stringify(body.raw, null, 2)
+}
+
 async function approve() {
   busy.value = true
   const response = await api('/admin/kg/bundles/' + route.params.id + '/approve', {
@@ -167,6 +185,7 @@ onMounted(load)
 
 <style scoped>
 .actions { display: flex; gap: 8px; margin-top: 12px; }
+.snap { margin-top: 12px; max-height: 360px; overflow: auto; background: #f6f7f9; padding: 8px; }
 .actions .el-input { max-width: 360px; }
 .confirm-row { margin-top: 8px; }
 </style>

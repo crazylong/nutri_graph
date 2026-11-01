@@ -167,6 +167,45 @@ def test_other_unresolved_still_capped_at_two():
     assert _eligible_terms(state) == ["猪脚", "天麻", "当归", "甲甲", "乙乙"]
 
 
+def test_segment_and_profile_record_model_latency(monkeypatch):
+    captured = []
+
+    def record(**kwargs):
+        captured.append(kwargs)
+
+    monkeypatch.setattr("llm.usage.record", record)
+
+    class Msg:
+        content = "[]"
+        response_metadata = {"model_name": "m"}
+        usage_metadata = {"input_tokens": 3, "output_tokens": 1}
+
+    class Chain:
+        def invoke(self, messages):
+            time.sleep(0.03)
+            return Msg()
+
+    monkeypatch.setattr("llm.router.pool_chain", lambda **kwargs: Chain())
+    from kg.segment import _default_llm
+
+    assert _default_llm("黑豆怎么吃") == "[]"
+    assert captured[-1]["purpose_name"] == "segment"
+    assert captured[-1]["latency_ms"] >= 20
+
+    class ProfileModel:
+        def invoke(self, prompt):
+            time.sleep(0.03)
+            msg = Msg()
+            msg.content = "{}"
+            return msg
+
+    from graph.boundary import parse_profile_from_answer
+
+    parse_profile_from_answer("用户：我不吃香菜", ProfileModel())
+    assert captured[-1]["purpose_name"] == "profile"
+    assert captured[-1]["latency_ms"] >= 20
+
+
 def test_existing_node_props_keep_provenance():
     props = {
         "canonical_name": "新名字",

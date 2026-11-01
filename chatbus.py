@@ -65,6 +65,34 @@ class MemoryBus:
         return None
 
 
+_async_client = None
+
+
+async def _async_redis():
+    """读侧复用一条异步连接。密码为空或建连失败时返回 None。"""
+    global _async_client
+    if _async_client is not None:
+        return _async_client
+    if not config.REDIS_PASSWORD:
+        return None
+    try:
+        import redis.asyncio as aioredis
+
+        client = aioredis.Redis(
+            host=config.REDIS_HOST,
+            port=config.REDIS_PORT,
+            password=config.REDIS_PASSWORD,
+            decode_responses=True,
+            socket_connect_timeout=2,
+        )
+        await client.ping()
+        _async_client = client
+        return client
+    except Exception as exc:  # noqa: BLE001
+        log.warning("异步 Redis 不可用：%s", exc)
+        return None
+
+
 class RedisBus:
     def __init__(self, client):
         self.client = client
@@ -106,22 +134,14 @@ class RedisBus:
             return False
 
     async def blpop(self, stream_id: str, timeout: float):
-        import redis.asyncio as aioredis
-
-        client = aioredis.Redis(
-            host=config.REDIS_HOST,
-            port=config.REDIS_PORT,
-            password=config.REDIS_PASSWORD,
-            decode_responses=True,
-            socket_connect_timeout=2,
-        )
+        client = await _async_redis()
+        if client is None:
+            return None
         try:
             item = await client.blpop(f"nutri:chat:{stream_id}", timeout=timeout)
         except Exception as exc:  # noqa: BLE001
             log.warning("Redis BLPOP 失败：%s", exc)
             return None
-        finally:
-            await client.aclose()
         if not item:
             return None
         _key, raw = item
@@ -150,7 +170,13 @@ def open_bus():
 
 
 def _frame(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    body = dict(data or {})
+    from llm.usage import current_rid
+
+    rid = current_rid()
+    if rid:
+        body.setdefault("rid", rid)
+    return f"event: {event}\ndata: {json.dumps(body, ensure_ascii=False)}\n\n"
 
 
 async def iter_sse(bus, stream_id: str, deadline: float):

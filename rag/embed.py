@@ -25,10 +25,24 @@ def get_embeddings() -> OpenAIEmbeddings:
     直接在 httpx 里发 `input=["黑豆"]` 是 200，所以问题不在 key、不在模型名。
     关掉之后 SDK 原样发字符串数组，正常返回 1024 维。
     """
-    return OpenAIEmbeddings(
+    inner = OpenAIEmbeddings(
         model=config.EMBEDDING_MODEL,
         api_key=config.DASHSCOPE_API_KEY,
         base_url=config.DASHSCOPE_BASE_URL,
         dimensions=config.EMBEDDING_DIM,
         check_embedding_ctx_length=False,
     )
+    return _CachingEmbeddings(inner)
+
+
+class _CachingEmbeddings:
+    def __init__(self, inner):
+        self._inner = inner
+
+    def embed_query(self, text: str):
+        from utils.cache import cached_embedding
+
+        return cached_embedding(config.EMBEDDING_MODEL, text, lambda: self._inner.embed_query(text))
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)

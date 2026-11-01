@@ -4,6 +4,7 @@
       <div class="brand">食疗管理</div>
       <el-menu :default-active="route.path.startsWith('/foods') ? '/foods' : route.path" router>
         <el-menu-item index="/overview">概览</el-menu-item>
+        <el-menu-item index="/trace">调用追踪</el-menu-item>
         <el-menu-item index="/requests">未收录食物</el-menu-item>
         <el-menu-item index="/bundles">补录审核</el-menu-item>
         <el-menu-item index="/candidates">候选关系</el-menu-item>

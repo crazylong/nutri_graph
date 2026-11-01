@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 import config
 from langchain_core.messages import AIMessage, HumanMessage
@@ -113,6 +114,7 @@ def stream_model(prompt: str, *, enable_thinking: bool | None = False) -> str:
                 mark_skip_save()
                 raise StreamCancelled()
             budget = plan.budget(spec)
+            t0 = time.perf_counter()
             try:
                 text, usage, stopped = _read_stream(plan.model_for(spec), prompt, target, seen)
                 if not text.strip() and not stopped:
@@ -124,6 +126,7 @@ def stream_model(prompt: str, *, enable_thinking: bool | None = False) -> str:
                     text, usage, stopped = _read_stream(
                         plan.model_for(spec, max_tokens=bumped), prompt, target, seen,
                     )
+                latency_ms = int((time.perf_counter() - t0) * 1000)
                 if text.strip() or stopped:
                     if usage == (0, 0):
                         log.warning("流式响应没有 usage_metadata，本次记 0 token")
@@ -136,16 +139,17 @@ def stream_model(prompt: str, *, enable_thinking: bool | None = False) -> str:
                             "total_tokens": pin + pout,
                         },
                     )
-                    plan.on_success(spec, msg, msg)
+                    plan.on_success(spec, msg, msg, prompt=prompt, latency_ms=latency_ms)
                     return text
-                plan.on_starved(spec, "流式正文为空")
+                plan.on_starved(spec, "流式正文为空", prompt=prompt, latency_ms=latency_ms)
             except StreamCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001
+                latency_ms = int((time.perf_counter() - t0) * 1000)
                 if seen:
-                    plan.on_error(spec, exc)
+                    plan.on_error(spec, exc, prompt=prompt, latency_ms=latency_ms)
                     mark_skip_save()
                     raise ModelStreamBroken(str(exc)) from exc
-                if not plan.on_error(spec, exc):
+                if not plan.on_error(spec, exc, prompt=prompt, latency_ms=latency_ms):
                     raise
         raise plan.exhausted()

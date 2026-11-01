@@ -151,6 +151,19 @@ class GraphQuery:
         allergens = allergens or []
         if include_provisional is None:
             include_provisional = config.INCLUDE_PROVISIONAL
+        if not config.CACHE_ENABLED:
+            return self._run_uncached(intent, cid, allowed, allergens, include_provisional)
+        from utils.cache import cached_json, graph_key
+
+        policy = ",".join(allowed)
+        key = graph_key(intent, cid, allergens, policy, include_provisional)
+
+        def _load():
+            return self._run_uncached(intent, cid, allowed, allergens, include_provisional)
+
+        return cached_json(key, int(config.CACHE_GRAPH_TTL_S), _load)
+
+    def _run_uncached(self, intent, cid, allowed, allergens, include_provisional):
         with self.driver.session() as s:
             result = s.run(
                 TEMPLATES[intent],
