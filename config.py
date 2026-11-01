@@ -86,6 +86,24 @@ DASHSCOPE_BASE_URL = os.getenv(
 )
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+# 企业知识库用另一套多模态模型。维度和食疗线的 1024 不同，集合也分开。
+KB_COLLECTION = os.getenv("KB_COLLECTION", "kb_mm_tongyi_vision_plus_1152")
+KB_EMBED_MODEL = os.getenv("KB_EMBED_MODEL", "tongyi-embedding-vision-plus-2026-03-06")
+KB_EMBED_DIM = int(os.getenv("KB_EMBED_DIM", "1152"))
+KB_CAPTION_MODEL = os.getenv("KB_CAPTION_MODEL", "qwen-vl-plus")
+KB_LAYOUT_BACKEND = os.getenv("KB_LAYOUT_BACKEND", "mock")
+# dots.mocr 私有化部署的 OpenAI 兼容基地址，形如 http://127.0.0.1:8000/v1
+KB_LAYOUT_URL = os.getenv("KB_LAYOUT_URL", "")
+# dots.mocr 的模型名（vLLM 里 serve 的名字，可能是 dots.mocr 或 dots-studio/dots.mocr）
+KB_LAYOUT_MODEL = os.getenv("KB_LAYOUT_MODEL", "dots-mocr")
+# 私有化部署通常无需鉴权，留空即可；有需要再填
+KB_LAYOUT_API_KEY = os.getenv("KB_LAYOUT_API_KEY", "")
+KB_DATA_DIR = os.getenv("KB_DATA_DIR", "data/kb")
+# 这个模型文本上限 1024 token。中文按一字一 token 估，切块留余量。
+KB_CHUNK_CHARS = int(os.getenv("KB_CHUNK_CHARS", "480"))
+KB_CHUNK_OVERLAP = int(os.getenv("KB_CHUNK_OVERLAP", "48"))
+# 一次提问交给模型的文档块数。食疗记忆的轮数仍用 MEMORY_RETAIN_TURNS。
+KB_SEARCH_LIMIT = int(os.getenv("KB_SEARCH_LIMIT", "6"))
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 # 推理模型（deepseek / qwen-thinking）会把 completion 预算先花在 reasoning 上，
@@ -299,7 +317,8 @@ SMS_TEMPLATE_CODE = os.getenv("SMS_TEMPLATE_CODE", "")
 SMS_SCHEME_NAME = os.getenv("SMS_SCHEME_NAME", "")
 # 模板变量：##code## 是平台占位符，min 为有效分钟数（随 SMS_VALID_TIME_S 一起改）
 SMS_TEMPLATE_PARAM = os.getenv("SMS_TEMPLATE_PARAM", '{"code":"##code##","min":"5"}')
-# 让接口把生成的验证码回传（仅本地联调用，生产必须 false）
+# 让 /auth/sms 把验证码回给调用方（仅本地联调用，生产必须 false）。
+# 管理端流水另行保存明文，不看这个开关。
 SMS_RETURN_VERIFY_CODE = os.getenv("SMS_RETURN_VERIFY_CODE", "false").lower() == "true"
 
 # ---- 验证码策略 ----

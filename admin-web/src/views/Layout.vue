@@ -2,7 +2,7 @@
   <el-container class="shell">
     <el-aside width="200px">
       <div class="brand">食疗管理</div>
-      <el-menu :default-active="route.path.startsWith('/foods') ? '/foods' : route.path" router>
+      <el-menu :default-active="active" router>
         <el-menu-item index="/overview">概览</el-menu-item>
         <el-menu-item index="/trace">调用追踪</el-menu-item>
         <el-menu-item index="/requests">未收录食物</el-menu-item>
@@ -12,6 +12,8 @@
         <el-menu-item index="/import-new">批量导入</el-menu-item>
         <el-menu-item index="/imports">导入记录</el-menu-item>
         <el-menu-item index="/foods">食物查询</el-menu-item>
+        <el-menu-item index="/kb">知识库查询</el-menu-item>
+        <el-menu-item index="/kb-review">知识库审核</el-menu-item>
         <el-menu-item index="/sms">短信记录</el-menu-item>
       </el-menu>
     </el-aside>
@@ -28,13 +30,19 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, readJson, tokens } from '../api'
 
 const route = useRoute()
 const router = useRouter()
 const mask = ref('')
+const active = computed(() => {
+  if (route.path.startsWith('/foods')) return '/foods'
+  if (route.path.startsWith('/kb-review')) return '/kb-review'
+  if (route.path.startsWith('/kb')) return '/kb'
+  return route.path
+})
 
 async function logout() {
   if (tokens.refresh) {

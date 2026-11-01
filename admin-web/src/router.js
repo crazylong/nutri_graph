@@ -11,6 +11,8 @@ import Import from './views/Import.vue'
 import ImportJobs from './views/ImportJobs.vue'
 import Foods from './views/Foods.vue'
 import FoodDetail from './views/FoodDetail.vue'
+import KbDocs from './views/KbDocs.vue'
+import KbReview from './views/KbReview.vue'
 import SmsLogs from './views/SmsLogs.vue'
 import Trace from './views/Trace.vue'
 import { tokens } from './api'
@@ -35,6 +37,8 @@ const router = createRouter({
         { path: 'imports', component: ImportJobs },
         { path: 'foods', component: Foods },
         { path: 'foods/:cid', component: FoodDetail },
+        { path: 'kb', component: KbDocs },
+        { path: 'kb-review', component: KbReview },
         { path: 'sms', component: SmsLogs },
       ],
     },

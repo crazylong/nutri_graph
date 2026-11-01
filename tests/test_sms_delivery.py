@@ -199,7 +199,10 @@ def test_admin_sms_list(client):
     queried = client.get("/admin/sms", headers=headers, params={"phone": phone})
     assert queried.status_code == 200
     assert queried.json()["phone_mask"] == phone_mask(phone)
-    assert queried.json()["items"]
+    items = queried.json()["items"]
+    assert items
+    assert items[0]["verify_code"]
+    assert "phone_hash" not in str(queried.json())
 
     bad = client.get("/admin/sms", headers=headers, params={"phone": "123"})
     assert bad.status_code == 422

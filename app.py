@@ -25,6 +25,8 @@ import db
 from api.admin import router as admin_router
 from api.admin_foods import router as admin_foods_router
 from api.admin_import import router as admin_import_router
+from api.admin_kb import router as admin_kb_router
+from api.kb import router as kb_router
 from api.auth import router as auth_router
 from api.chat import router as chat_router
 from api.food_import import router as food_import_router
@@ -60,7 +62,7 @@ def _startup_report() -> None:
         )
     if config.SMS_PROVIDER == "console" and not config.DEBUG:
         log.warning(
-            "SMS_PROVIDER=console 但 DEBUG=false：不会真正发短信，验证码只出现在日志里"
+            "SMS_PROVIDER=console 但 DEBUG=false：不会真正发短信，验证码写在日志和管理端短信记录里"
         )
     elif config.SMS_PROVIDER == "dypns":
         # 真发短信前把「能不能发」说清楚：缺凭据/缺 SDK 时 /auth/sms 一律 503，
@@ -117,7 +119,8 @@ async def _pool_busy_handler(_request, exc: db.PoolBusy):
     )
 
 for _router in (
-    auth_router, admin_router, admin_foods_router, admin_import_router, chat_router, history_router,
+    auth_router, admin_router, admin_foods_router, admin_import_router, admin_kb_router,
+    kb_router, chat_router, history_router,
     kg_router, food_import_router, health_router, system_router, metrics_router,
 ):
     app.include_router(_router)

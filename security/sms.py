@@ -45,7 +45,8 @@ class SendResult:
     provider: str
     msg_id: str = ""
     biz_id: str = ""
-    dev_code: str = ""      # 仅 console provider 且 DEBUG 时回填
+    dev_code: str = ""      # 仅允许回给 /auth/sms 调用方时回填
+    verify_code: str = ""   # 明文，只进管理端流水，不进公开响应
     error: str = ""
 
 
@@ -88,7 +89,13 @@ class ConsoleProvider(SmsProvider):
             config.SMS_VALID_TIME_S,
         )
         dev_code = code if config.DEBUG else ""
-        return SendResult(ok=True, provider=self.name, msg_id=f"console-{uuid.uuid4().hex[:8]}", dev_code=dev_code)
+        return SendResult(
+            ok=True,
+            provider=self.name,
+            msg_id=f"console-{uuid.uuid4().hex[:8]}",
+            dev_code=dev_code,
+            verify_code=code,
+        )
 
     def verify(self, phone: str, code: str, purpose: str = "login") -> tuple[bool, str]:
         ph = phone_hash(phone)
@@ -180,7 +187,9 @@ class DypnsProvider(SmsProvider):
                 interval=config.SMS_INTERVAL_S,
                 code_type=1,              # 1 = 纯数字
                 duplicate_policy=1,       # 同号重复发送时旧验证码失效
-                return_verify_code=config.SMS_RETURN_VERIFY_CODE,
+                # 始终向平台要明文，只写入管理端流水。
+                # 是否放进 /auth/sms 响应仍看 SMS_RETURN_VERIFY_CODE。
+                return_verify_code=True,
             )
             resp = client.send_sms_verify_code_with_options(req, self._runtime())
             body = getattr(resp, "body", None)
@@ -191,14 +200,19 @@ class DypnsProvider(SmsProvider):
                 return SendResult(ok=False, provider=self.name, msg_id=out_id, error=f"{code}: {msg}")
 
             model = getattr(body, "model", None)
-            dev_code = ""
+            verify_code = ""
             biz_id = ""
             if model is not None:
                 biz_id = str(getattr(model, "biz_id", None) or getattr(model, "BizId", None) or "")
-                if config.SMS_RETURN_VERIFY_CODE:
-                    dev_code = getattr(model, "verify_code", "") or ""
+                verify_code = str(getattr(model, "verify_code", "") or "")
+            dev_code = verify_code if config.SMS_RETURN_VERIFY_CODE else ""
             return SendResult(
-                ok=True, provider=self.name, msg_id=out_id, biz_id=biz_id, dev_code=dev_code,
+                ok=True,
+                provider=self.name,
+                msg_id=out_id,
+                biz_id=biz_id,
+                dev_code=dev_code,
+                verify_code=verify_code,
             )
         except SmsConfigError:
             # 没配好就是没配好，让 api 层翻译成 503，不要伪装成「上游失败」

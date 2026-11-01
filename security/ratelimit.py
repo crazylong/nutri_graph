@@ -206,6 +206,7 @@ def record_send(
     phone_mask: str = "",
     biz_id: str = "",
     delivery_status: str = "none",
+    verify_code: str = "",
 ) -> None:
     """每次下发都记一条（成功与否都记），失败也计入频控可防止「靠失败无限重试」。"""
     try:
@@ -213,11 +214,11 @@ def record_send(
             conn.execute(
                 "INSERT INTO sms_send_log "
                 "(phone_hash, ip, device_fp, purpose, provider, provider_msg_id, ok, error, "
-                " phone_mask, biz_id, delivery_status) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                " phone_mask, biz_id, delivery_status, verify_code) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
                     phone_hash, ip, device_fp, purpose, provider, msg_id, ok, error[:500],
-                    phone_mask, biz_id, delivery_status,
+                    phone_mask, biz_id, delivery_status, verify_code,
                 ),
             )
     except Exception as exc:  # noqa: BLE001 —— 记账失败不能阻断主流程

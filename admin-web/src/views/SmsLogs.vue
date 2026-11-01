@@ -20,6 +20,9 @@
         <template #default="{ row }">{{ row.created_at }}</template>
       </el-table-column>
       <el-table-column prop="phone_mask" label="手机号" width="120" />
+      <el-table-column label="验证码" width="100">
+        <template #default="{ row }">{{ row.verify_code || '—' }}</template>
+      </el-table-column>
       <el-table-column prop="purpose" label="用途" width="80" />
       <el-table-column prop="provider" label="通道" width="90" />
       <el-table-column label="受理" width="70">

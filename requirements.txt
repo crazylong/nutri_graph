@@ -17,6 +17,9 @@ uvicorn[standard]>=0.54.0,<1.0.0
 python-multipart>=0.0.20,<1.0.0
 # openpyxl 只读 xlsx（read_only=True），不参与写图/写库
 openpyxl>=3.1.5,<4.0.0
+# 企业知识库：PDF 抽正文和图，DOCX 抽段落和图
+pymupdf>=1.24.0,<2.0.0
+python-docx>=1.1.2,<2.0.0
 
 # Milvus Vector DB
 pymilvus>=3.0.2,<4.0.0

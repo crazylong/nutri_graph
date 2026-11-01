@@ -57,6 +57,27 @@ cd /opt/code/nutri_graph
 
 脚本会明确警告 `AUTH_REQUIRED=false` 这件事（见下面「已知风险」）。
 
+## 版面解析（dots.mocr，私有化部署）
+
+企业知识库 PDF 的版面解析用 dots.mocr（小红书开源的 3B 多模态 OCR 模型）。
+它通过 vLLM 起一个 **OpenAI 兼容** 的 `/v1/chat/completions` 端点，本机 GPU 上跑。
+
+`.env` 里三段配置（未写的走 config.py 默认值）：
+
+```bash
+KB_LAYOUT_BACKEND=mock            # mock=假解析（无 GPU 先跑通）；dots_mocr=真实解析
+KB_LAYOUT_URL=http://127.0.0.1:8000/v1   # dots.mocr 的 OpenAI 兼容基地址（含 /v1）
+KB_LAYOUT_MODEL=dots-mocr         # vLLM 里 serve 的模型名
+KB_LAYOUT_API_KEY=                # 私有化部署通常无需鉴权，留空即可
+```
+
+- dots.mocr 是**图像** OCR 模型，不吃 PDF：`kb/parse_pdf.py` 会用 PyMuPDF 把每页
+  渲染成 PNG（dpi=144）再 base64 逐页喂给它，prompt 用官方 `prompt_layout_all_en`
+  （输出带 bbox、类别、文字的 JSON，按阅读顺序）。
+- 标题层级由类别 `Title`/`Section-header` 映射，正文来自 `Text`/`List-item`/`Table`/
+  `Formula`/`Caption`/`Footnote`，`Picture` 仍由 PyMuPDF 抽图，页眉页脚丢弃。
+- 验证连通：`curl -s http://127.0.0.1:8000/v1/models` 应返回 `id: dots-mocr`。
+
 ## 日常运维
 
 ```bash

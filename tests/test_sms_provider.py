@@ -47,3 +47,25 @@ def test_send_response_echoes_masked_phone(client):
     body = r.json()
     assert body["phone_mask"] == phone[:3] + "****" + phone[-4:]
     assert phone not in str(body)
+
+
+def test_console_code_is_logged_for_admin_even_when_debug_off(client, monkeypatch):
+    """DEBUG 关掉后公开接口不再回验证码，管理端流水里仍要有明文。"""
+    import psycopg
+
+    from security.crypto import phone_hash
+
+    monkeypatch.setattr(config, "DEBUG", False)
+    phone = rand_phone()
+    r = client.post("/auth/sms", json={"phone": phone})
+    assert r.status_code == 200, r.text
+    assert "dev_code" not in r.json()
+    with psycopg.connect(config.PG_DSN) as conn:
+        row = conn.execute(
+            "SELECT verify_code FROM sms_send_log WHERE phone_hash = %s "
+            "ORDER BY id DESC LIMIT 1",
+            (phone_hash(phone),),
+        ).fetchone()
+    assert row is not None
+    assert len(row[0]) == config.SMS_CODE_LENGTH
+    assert row[0].isdigit()

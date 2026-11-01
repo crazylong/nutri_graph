@@ -1219,7 +1219,7 @@ def list_sms(
         total = int(cur.fetchone()[0])
         cur.execute(
             "SELECT created_at, phone_mask, purpose, provider, ok, delivery_status, "
-            "err_code, err_msg, biz_id, provider_msg_id "
+            "err_code, err_msg, biz_id, provider_msg_id, verify_code "
             f"FROM sms_send_log WHERE {where} "
             "ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s",
             [*args, _SMS_PAGE, offset],

@@ -250,6 +250,7 @@ def send_sms(req: SmsRequest, request: Request):
         phone_mask=phone_mask(phone),
         biz_id=result.biz_id,
         delivery_status="pending" if result.ok and provider.name == "dypns" else "none",
+        verify_code=result.verify_code,
     )
 
     if not result.ok:
