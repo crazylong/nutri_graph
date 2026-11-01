@@ -1,0 +1,10 @@
+[Unit]
+Description=每天跑一次账本清理和养分漂移干跑
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

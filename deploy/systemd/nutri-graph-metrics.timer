@@ -1,0 +1,11 @@
+[Unit]
+Description=每分钟上报一次 /metrics（开机后第一次，之后跑完再等）
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=1min
+AccuracySec=5s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

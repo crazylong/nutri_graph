@@ -1,0 +1,10 @@
+[Unit]
+Description=nutri_graph 每日清理与养分干跑
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/code/nutri_graph
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/envs/nutri/bin/python -m scripts.daily
+User=root

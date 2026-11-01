@@ -1,0 +1,10 @@
+[Unit]
+Description=nutri_graph 指标上报
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/code/nutri_graph
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/envs/nutri/bin/python -m scripts.report_metrics
+User=root
