@@ -128,23 +128,169 @@ async function ask() {
 </script>
 
 <style>
-body { margin: 0; font-family: "PingFang SC", "Noto Sans SC", sans-serif; background: #f6f4ef; color: #1f2430; }
-.page { max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }
-.bar { display: flex; align-items: center; justify-content: space-between; }
-h1 { font-size: 28px; margin: 0; }
-button.ghost { background: transparent; color: #1f6b4a; border: 1px solid #1f6b4a; }
-.thread { margin: 20px 0; }
-.user, .assistant { margin: 14px 0; }
-.who { margin: 0 0 4px; color: #5c6570; font-size: 13px; }
-.content { margin: 0; white-space: pre-wrap; }
-.hit { display: flex; gap: 12px; background: #fff; border-radius: 10px; padding: 12px 14px; margin: 10px 0; }
-.hit img { width: 168px; height: 126px; object-fit: contain; background: #f3f1ea; border-radius: 8px; flex: none; }
+:root {
+  --ng-bg: #f4f7f3;
+  --ng-panel: #ffffff;
+  --ng-ink: #1a241e;
+  --ng-ink-2: #55635b;
+  --ng-ink-3: #87948b;
+  --ng-line: #e3e9e4;
+  --ng-accent: #2f7d5d;
+  --ng-accent-grad: linear-gradient(135deg, #3a8f6b 0%, #2c7a59 55%, #256a4d 100%);
+  --ng-accent-weak: #eaf4ee;
+  --ng-shadow-sm: 0 1px 2px rgba(26, 36, 30, .05), 0 2px 6px rgba(26, 36, 30, .04);
+  --ng-shadow: 0 1px 2px rgba(26, 36, 30, .05), 0 6px 20px rgba(26, 36, 30, .06);
+}
+
+body {
+  margin: 0;
+  font-family: "PingFang SC", "Noto Sans SC", -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--ng-bg);
+  background-image:
+    radial-gradient(1000px 520px at 15% -10%, #e7f3ec 0%, rgba(231, 243, 236, 0) 60%),
+    radial-gradient(800px 460px at 100% 0%, #eef5ee 0%, rgba(238, 245, 238, 0) 55%);
+  background-attachment: fixed;
+  color: var(--ng-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+.page { max-width: 760px; margin: 0 auto; padding: 32px 20px 72px; }
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  background: rgba(255, 255, 255, .82);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--ng-line);
+  border-radius: 14px;
+  box-shadow: var(--ng-shadow-sm);
+  margin-bottom: 20px;
+}
+
+h1 {
+  font-size: 19px;
+  margin: 0;
+  font-weight: 650;
+  letter-spacing: .2px;
+  background: var(--ng-accent-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+button.ghost {
+  background: #fff;
+  color: var(--ng-accent);
+  border: 1px solid var(--ng-line);
+  padding: 7px 15px;
+  border-radius: 9px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: .15s;
+}
+button.ghost:hover { border-color: var(--ng-accent); background: var(--ng-accent-weak); }
+
+.thread { margin: 0 0 22px; }
+
+.user, .assistant { margin: 16px 0; }
+
+.user { display: flex; flex-direction: column; align-items: flex-end; }
+.user .who {
+  margin: 0 6px 5px 0;
+  color: var(--ng-ink-3);
+  font-size: 12px;
+}
+.user .content {
+  background: var(--ng-accent-grad);
+  color: #fff;
+  padding: 11px 16px;
+  border-radius: 14px 14px 4px 14px;
+  max-width: 82%;
+  white-space: pre-wrap;
+  box-shadow: 0 6px 16px rgba(47, 125, 93, .18);
+}
+
+.assistant { display: flex; gap: 12px; }
+.assistant .who {
+  flex: 0 0 auto;
+  width: 30px; height: 30px;
+  border-radius: 9px;
+  background: var(--ng-accent-grad);
+  color: #fff;
+  display: grid; place-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 3px 0 0;
+  box-shadow: 0 3px 10px rgba(47, 125, 93, .18);
+}
+.assistant .content {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  white-space: pre-wrap;
+  background: #fff;
+  border: 1px solid var(--ng-line);
+  border-radius: 4px 14px 14px 14px;
+  padding: 14px 16px;
+  box-shadow: var(--ng-shadow-sm);
+}
+
+.who { margin: 0 0 4px; color: var(--ng-ink-3); font-size: 13px; }
+
+.hits { margin-top: 10px; }
+.hit {
+  display: flex;
+  gap: 12px;
+  background: #fbfdfb;
+  border: 1px solid var(--ng-line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin: 8px 0;
+}
+.hit img { width: 168px; height: 126px; object-fit: contain; background: #f3f5f3; border-radius: 8px; flex: none; }
 .hit p { margin: 6px 0 0; }
-label { display: block; margin: 14px 0; font-size: 14px; }
-select, textarea, input[type="file"] { display: block; width: 100%; margin-top: 6px; font: inherit; }
-textarea, select { border: 1px solid #d5d0c6; border-radius: 8px; padding: 8px 10px; background: #fff; }
-button { background: #1f6b4a; color: #fff; border: 0; border-radius: 8px; padding: 8px 18px; font: inherit; cursor: pointer; }
-button:disabled { opacity: 0.6; }
-.error { color: #9b2c2c; }
-.path { color: #5c6570; font-size: 13px; }
+.path { color: var(--ng-ink-3); font-size: 13px; }
+
+/* 输入区做成一张卡片 */
+label { display: block; margin: 14px 0; font-size: 14px; color: var(--ng-ink-2); }
+
+select, textarea, input[type="file"] {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  font: inherit;
+  color: var(--ng-ink);
+}
+textarea, select {
+  border: 1px solid var(--ng-line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+textarea:focus, select:focus {
+  border-color: var(--ng-accent);
+  box-shadow: 0 0 0 3px rgba(47, 125, 93, .12);
+}
+
+button {
+  background: var(--ng-accent-grad);
+  color: #fff;
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 22px;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 3px 10px rgba(47, 125, 93, .18);
+  transition: transform .15s, box-shadow .15s;
+}
+button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(47, 125, 93, .22); }
+button:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
+
+.error { color: #b0442f; }
 </style>

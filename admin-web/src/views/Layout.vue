@@ -68,7 +68,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.shell { min-height: 100vh; }
-.brand { padding: 18px 16px; font-weight: 600; }
-.top { display: flex; justify-content: flex-end; align-items: center; gap: 12px; border-bottom: 1px solid #ebeef5; }
+.shell { min-height: 100vh; background: #f4f7f3; }
+.brand { padding: 20px 18px; font-weight: 650; font-size: 17px; letter-spacing: .3px; color: #2f7d5d; }
+.top { display: flex; justify-content: flex-end; align-items: center; gap: 12px; border-bottom: 1px solid #e3e9e4; background: #fff; }
 </style>
