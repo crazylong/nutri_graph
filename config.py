@@ -186,6 +186,11 @@ CACHE_EMBEDDING_TTL_H = int(os.getenv("CACHE_EMBEDDING_TTL_H", "24"))
 CACHE_GRAPH_TTL_S = int(os.getenv("CACHE_GRAPH_TTL_S", "300"))
 SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "data/snapshots")
 TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
+# 追踪入参/出参各自最多保存这么多个字符，超出的丢掉。
+_trace_text_max = int(os.getenv("TRACE_TEXT_MAX", "2048"))
+TRACE_TEXT_MAX = _trace_text_max if _trace_text_max > 0 else 2048
+# 超长时另写一列摘要。TRACE_ENABLED 关闭时这一项不生效。
+TRACE_SUMMARY_ENABLED = os.getenv("TRACE_SUMMARY_ENABLED", "false").lower() == "true"
 NUTRIENT_DRIFT_PATH = os.getenv("NUTRIENT_DRIFT_PATH", "data/nutrient_drift.json")
 
 

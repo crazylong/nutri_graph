@@ -35,7 +35,14 @@
         </template>
       </el-table-column>
     </el-table>
-    <el-tree v-if="tree.length" :data="tree" default-expand-all :props="{ label: 'label', children: 'children' }" />
+    <el-tree v-if="tree.length" :data="tree" default-expand-all :props="{ label: 'label', children: 'children' }">
+      <template #default="{ data }">
+        <div class="node">
+          <div>{{ data.label }}</div>
+          <pre v-if="data.summary" class="sum">{{ data.summary }}</pre>
+        </div>
+      </template>
+    </el-tree>
   </div>
 </template>
 
@@ -72,6 +79,7 @@ function labelOf(span) {
 function toTree(spans) {
   return (spans || []).map((span) => ({
     label: labelOf(span),
+    summary: span.summary || '',
     children: toTree(span.children || []),
   }))
 }
@@ -140,4 +148,12 @@ onMounted(loadRecent)
 <style scoped>
 .err { color: #c45656; }
 .hint { color: #909399; margin-left: 8px; }
+.node { white-space: normal; line-height: 1.5; }
+.sum {
+  white-space: pre-wrap;
+  color: #606266;
+  font-size: 12px;
+  margin: 4px 0 8px;
+  max-width: 720px;
+}
 </style>

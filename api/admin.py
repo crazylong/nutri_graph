@@ -220,7 +220,7 @@ def trace_detail(rid: str = Query("")):
         cur.execute(
             """
             SELECT span_id, parent_span_id, kind, node, model, purpose, input, output,
-                   prompt_tokens, completion_tokens, latency_ms, ok, ts
+                   summary, prompt_tokens, completion_tokens, latency_ms, ok, ts
             FROM llm_call_log WHERE rid = %s ORDER BY id
             """,
             (rid,),

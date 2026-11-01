@@ -6,6 +6,7 @@ llm 行是账本。node / tool 行只在 TRACE_ENABLED 时写。
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -22,7 +23,10 @@ _current_span: ContextVar[str] = ContextVar("current_span", default="")
 _redact: ContextVar[bool] = ContextVar("trace_redact", default=False)
 _keep_output: ContextVar[bool] = ContextVar("trace_keep_output", default=False)
 
-_TRUNC = 2048
+_SUMMARY_PURPOSE = "trace_summary"
+# 送给摘要模型的原文上限。再长就保留头尾，避免一次摘要把上下文撑满。
+_SUMMARY_SOURCE_MAX = 8000
+_SUMMARY_STORE_MAX = 500
 _price_warned: set[str] = set()
 
 
@@ -79,11 +83,118 @@ def price_yuan(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     return (max(prompt_tokens, 0) / 1000.0) * yuan_in + (max(completion_tokens, 0) / 1000.0) * yuan_out
 
 
+def _text_max() -> int:
+    limit = int(config.TRACE_TEXT_MAX)
+    return limit if limit > 0 else 2048
+
+
 def _clip(text: str) -> str:
     text = text or ""
-    if len(text) > _TRUNC:
-        return text[:_TRUNC]
+    limit = _text_max()
+    if len(text) > limit:
+        return text[:limit]
     return text
+
+
+def _summary_on() -> bool:
+    """摘要开关只有在追踪正文也打开时才算数。"""
+    return bool(config.TRACE_ENABLED and config.TRACE_SUMMARY_ENABLED)
+
+
+def _shrink_source(text: str) -> str:
+    if len(text) <= _SUMMARY_SOURCE_MAX:
+        return text
+    head = _SUMMARY_SOURCE_MAX // 2
+    tail = _SUMMARY_SOURCE_MAX - head
+    return text[:head] + "\n…（中间已略）\n" + text[-tail:]
+
+
+def _make_summary(full_in: str, full_out: str) -> tuple[str, str, int, int, int]:
+    """返回 (摘要, 模型名, prompt_tokens, completion_tokens, latency_ms)。"""
+    from langchain_core.messages import HumanMessage
+
+    from llm.middleware import _usage
+    from llm.router import pool_chain
+
+    blocks = []
+    if full_in:
+        blocks.append("入参：\n" + _shrink_source(full_in))
+    if full_out:
+        blocks.append("出参：\n" + _shrink_source(full_out))
+    prompt = (
+        "把下面超长的模型调用原文压成摘要，只保留关键事实，不要发挥。"
+        "每一侧不超过 200 字。没有给出的一侧不要写。\n\n"
+        + "\n\n".join(blocks)
+    )
+    started = time.perf_counter()
+    resp = pool_chain(temperature=0, max_tokens=400, enable_thinking=False).invoke(
+        [HumanMessage(content=prompt)]
+    )
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    content = getattr(resp, "content", resp)
+    text = content if isinstance(content, str) else str(content or "")
+    text = text.strip()[:_SUMMARY_STORE_MAX]
+    meta = getattr(resp, "response_metadata", None) or {}
+    pin, pout = _usage(resp if not isinstance(resp, str) else None)
+    model = str(meta.get("model_name") or meta.get("model") or "")
+    return text, model, pin, pout, latency_ms
+
+
+def _write_summary(span_id: str, full_in: str, full_out: str) -> None:
+    """补上摘要。打码若已经写过占位，就不要再用原文摘要盖回去。"""
+    from kg.sensitive import REDACT
+
+    try:
+        text, model, pin, pout, latency_ms = _make_summary(full_in, full_out)
+    except Exception:
+        log.warning("追踪摘要失败 span=%s", span_id, exc_info=True)
+        return
+    if not text:
+        return
+    try:
+        import db
+
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT input, output, summary FROM llm_call_log WHERE span_id = %s",
+                (span_id,),
+            ).fetchone()
+            if row is not None and not row[2]:
+                stored = REDACT if row[0] == REDACT or row[1] == REDACT else text
+                conn.execute(
+                    "UPDATE llm_call_log SET summary = %s WHERE span_id = %s AND summary = ''",
+                    (stored, span_id),
+                )
+    except Exception:
+        log.warning("写入追踪摘要失败 span=%s", span_id, exc_info=True)
+        return
+    parent = _current_span.set(span_id)
+    try:
+        record(
+            kind="llm",
+            model=model,
+            input="",
+            output="",
+            prompt_tokens=pin,
+            completion_tokens=pout,
+            latency_ms=latency_ms,
+            purpose_name=_SUMMARY_PURPOSE,
+        )
+    finally:
+        _current_span.reset(parent)
+
+
+def _maybe_summarize(span_id: str, purpose: str, full_in: str, full_out: str) -> None:
+    if not span_id or not _summary_on() or purpose == _SUMMARY_PURPOSE:
+        return
+    limit = _text_max()
+    over_in = full_in if len(full_in) > limit else ""
+    over_out = full_out if len(full_out) > limit else ""
+    if not over_in and not over_out:
+        return
+    from utils.spawn import submit_background
+
+    submit_background("trace-summary", _write_summary, span_id, over_in, over_out)
 
 
 def _redacted_text(text: str, *, is_output: bool) -> str:
@@ -106,6 +217,7 @@ def _insert(span_id: str, parent: str, kind: str, node: str, model: str, pur: st
     else:
         text_in = _redacted_text(text_in, is_output=False)
         text_out = _redacted_text(text_out, is_output=True)
+    full_in, full_out = text_in, text_out
     try:
         import db
 
@@ -138,6 +250,8 @@ def _insert(span_id: str, parent: str, kind: str, node: str, model: str, pur: st
             )
     except Exception as exc:  # noqa: BLE001 —— 记账失败不能挡住回答
         log.warning("写入 llm_call_log 失败：%s", exc)
+        return
+    _maybe_summarize(span_id, pur or "", full_in, full_out)
 
 
 def record(
@@ -203,13 +317,13 @@ def redact_stored(rid: str, *, keep_output: bool) -> None:
         with db.connect() as conn:
             if keep_output:
                 conn.execute(
-                    "UPDATE llm_call_log SET input = %s WHERE rid = %s",
-                    (REDACT, rid),
+                    "UPDATE llm_call_log SET input = %s, summary = %s WHERE rid = %s",
+                    (REDACT, REDACT, rid),
                 )
             else:
                 conn.execute(
-                    "UPDATE llm_call_log SET input = %s, output = %s WHERE rid = %s",
-                    (REDACT, REDACT, rid),
+                    "UPDATE llm_call_log SET input = %s, output = %s, summary = %s WHERE rid = %s",
+                    (REDACT, REDACT, REDACT, rid),
                 )
     except Exception as exc:  # noqa: BLE001
         log.warning("按 rid 打码失败：%s", exc)
