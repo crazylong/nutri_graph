@@ -1,5 +1,31 @@
 <template>
   <main class="page">
+    <aside class="sidebar">
+      <button type="button" class="ghost" @click="fresh">新对话</button>
+      <h2>历史会话</h2>
+      <p v-if="!sessions.length" class="empty">还没有对话</p>
+      <button
+        v-for="item in sessions"
+        :key="item.id"
+        type="button"
+        class="history"
+        :class="{ active: item.id === sessionId }"
+        @click="openSession(item.id)"
+      >
+        <span class="title">{{ item.title || '未命名对话' }}</span>
+        <span class="when">{{ formatWhen(item.last_at) }}</span>
+      </button>
+      <h2>最近问过</h2>
+      <p v-if="!recent.length" class="empty">还没有提问</p>
+      <button
+        v-for="(item, index) in recent"
+        :key="index"
+        type="button"
+        class="recent"
+        @click="askRecent(item.question)"
+      >{{ item.question }}</button>
+    </aside>
+    <div class="main">
     <header class="bar">
       <h1>企业知识库</h1>
       <button type="button" class="ghost" @click="fresh">新对话</button>
@@ -7,6 +33,7 @@
     <section v-if="turns.length" class="thread">
       <article v-for="(turn, index) in turns" :key="index" :class="turn.role">
         <p class="who">{{ turn.role === 'user' ? '提问' : '回答' }}</p>
+        <p v-if="turn.role === 'assistant' && turn.status && !turn.content" class="status">{{ turn.status }}</p>
         <p class="content">{{ turn.content }}</p>
         <div v-if="turn.hits && turn.hits.length" class="hits">
           <div v-for="hit in turn.hits" :key="hit.chunk_id" class="hit">
@@ -32,10 +59,11 @@
     </label>
     <label>
       图片
-      <input type="file" accept="image/*" @change="onFile" />
+      <input ref="fileEl" type="file" accept="image/*" @change="onFile" />
     </label>
     <button :disabled="busy" @click="ask">提问</button>
     <p v-if="error" class="error">{{ error }}</p>
+    </div>
   </main>
 </template>
 
@@ -49,9 +77,12 @@ const tenants = ref([])
 const tenantId = ref('')
 const question = ref('')
 const file = ref(null)
+const fileEl = ref(null)
 const busy = ref(false)
 const error = ref('')
 const turns = ref([])
+const sessions = ref([])
+const recent = ref([])
 const sessionId = ref(localStorage.getItem(SESSION_KEY) || '')
 
 function clientId() {
@@ -63,6 +94,41 @@ function clientId() {
   return value
 }
 
+function formatWhen(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const month = date.getMonth() + 1
+  const day = date.getDate()
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  return month + '/' + day + ' ' + hours + ':' + minutes
+}
+
+async function loadHistory() {
+  if (!clientId()) return
+  const [rs, rq] = await Promise.all([
+    fetch('/kb/sessions?client_id=' + encodeURIComponent(clientId())),
+    fetch('/kb/recent?client_id=' + encodeURIComponent(clientId())),
+  ])
+  if (rs.ok) sessions.value = (await rs.json()).sessions || []
+  if (rq.ok) recent.value = (await rq.json()).questions || []
+}
+
+async function openSession(id) {
+  const r = await fetch('/kb/sessions/' + encodeURIComponent(id) + '?client_id=' + encodeURIComponent(clientId()))
+  if (!r.ok) {
+    fresh()
+    return
+  }
+  const body = await r.json()
+  sessionId.value = id
+  localStorage.setItem(SESSION_KEY, id)
+  turns.value = body.messages || []
+  error.value = ''
+  loadHistory()
+}
+
 onMounted(async () => {
   const response = await fetch('/kb/tenants')
   if (response.ok) {
@@ -70,14 +136,15 @@ onMounted(async () => {
     tenants.value = body.tenants || []
     if (tenants.value.length === 1) tenantId.value = tenants.value[0]
   }
-  if (!sessionId.value) return
-  const saved = await fetch('/kb/sessions/' + sessionId.value + '?client_id=' + encodeURIComponent(clientId()))
-  if (!saved.ok) {
-    fresh()
-    return
+  if (sessionId.value) {
+    const saved = await fetch('/kb/sessions/' + sessionId.value + '?client_id=' + encodeURIComponent(clientId()))
+    if (!saved.ok) fresh()
+    else {
+      const body = await saved.json()
+      turns.value = body.messages || []
+    }
   }
-  const body = await saved.json()
-  turns.value = body.messages || []
+  loadHistory()
 })
 
 function onFile(event) {
@@ -88,41 +155,103 @@ function fresh() {
   sessionId.value = ''
   turns.value = []
   localStorage.removeItem(SESSION_KEY)
+  loadHistory()
+}
+
+function askRecent(text) {
+  if (!tenantId.value) {
+    error.value = '请先选择租户'
+    return
+  }
+  question.value = text
+  ask()
+}
+
+async function readSse(response, onEvent) {
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let cut
+    while ((cut = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, cut)
+      buf = buf.slice(cut + 2)
+      if (!frame || frame.startsWith(':')) continue
+      let event = 'message'
+      const dataLines = []
+      frame.split('\n').forEach((line) => {
+        if (line.startsWith('event:')) event = line.slice(6).trim()
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+      })
+      if (!dataLines.length) continue
+      onEvent(event, JSON.parse(dataLines.join('')))
+    }
+  }
 }
 
 async function ask() {
+  if (busy.value) return
   error.value = ''
   if (!tenantId.value) {
     error.value = '请先选择租户'
     return
   }
   const spoken = question.value.trim()
+  const picked = file.value
+  const label = spoken || (picked && picked.name) || '（上传图片）'
   const data = new FormData()
   data.set('tenant_id', tenantId.value)
   data.set('question', spoken)
   data.set('client_id', clientId())
   if (sessionId.value) data.set('session_id', sessionId.value)
-  if (file.value) data.set('image', file.value)
+  if (picked) data.set('image', picked)
+  file.value = null
+  if (fileEl.value) fileEl.value.value = ''
+  question.value = ''
+  turns.value.push({ role: 'user', content: label })
+  turns.value.push({ role: 'assistant', content: '', hits: [], status: '' })
+  const answerIndex = turns.value.length - 1
   busy.value = true
+  let gotSse = false
   try {
-    const response = await fetch('/kb/ask', { method: 'POST', body: data })
-    const body = await response.json()
-    if (!response.ok) {
-      error.value = (body.detail && body.detail.message) || '提问失败'
+    const response = await fetch('/kb/ask/stream', { method: 'POST', body: data })
+    const ctype = response.headers.get('content-type') || ''
+    if (!response.ok || !ctype.includes('text/event-stream')) {
+      let body = null
+      try { body = await response.json() } catch { /* nginx 或 JSON 错误页 */ }
+      turns.value.splice(answerIndex - 1, 2)
+      error.value = (body && body.detail && body.detail.message) || (body && body.error) || '提问失败'
       if (response.status === 404) fresh()
       return
     }
-    if (body.session_id) {
-      sessionId.value = body.session_id
-      localStorage.setItem(SESSION_KEY, body.session_id)
+    gotSse = true
+    let result = null
+    await readSse(response, (event, payload) => {
+      const turn = turns.value[answerIndex]
+      if (!turn) return
+      if (event === 'status') turn.status = payload.text || ''
+      else if (event === 'text_delta') turn.content += payload.text || ''
+      else if (event === 'error') error.value = payload.text || '生成失败'
+      else if (event === 'result') result = payload
+    })
+    const turn = turns.value[answerIndex]
+    if (result && turn) {
+      if (!turn.content && result.answer) turn.content = result.answer
+      turn.hits = result.hits || []
+      turn.status = ''
+      if (result.session_id) {
+        sessionId.value = result.session_id
+        localStorage.setItem(SESSION_KEY, result.session_id)
+      }
     }
-    turns.value = turns.value.concat([
-      { role: 'user', content: spoken || (file.value && file.value.name) || '（上传图片）' },
-      { role: 'assistant', content: body.answer || '', hits: body.hits || [] },
-    ])
-    question.value = ''
+  } catch {
+    error.value = '连接被中断，请重试。'
   } finally {
     busy.value = false
+    if (gotSse) loadHistory()
   }
 }
 </script>
@@ -154,7 +283,62 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-.page { max-width: 760px; margin: 0 auto; padding: 32px 20px 72px; }
+.page {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 24px 20px 72px;
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.sidebar {
+  width: 260px;
+  flex: none;
+  background: var(--ng-panel);
+  border: 1px solid var(--ng-line);
+  border-radius: 14px;
+  box-shadow: var(--ng-shadow-sm);
+  padding: 14px;
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+.sidebar h2 {
+  margin: 16px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ng-ink-3);
+}
+.sidebar .empty { margin: 0; color: var(--ng-ink-3); font-size: 13px; }
+.sidebar button.history,
+.sidebar button.recent {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--ng-ink);
+  border: 0;
+  box-shadow: none;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 2px 0;
+  font-weight: 400;
+}
+.sidebar button.history:hover,
+.sidebar button.recent:hover { background: var(--ng-accent-weak); transform: none; }
+.sidebar button.history.active { background: var(--ng-accent-weak); }
+.sidebar .title,
+.sidebar button.recent {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar .when { display: block; color: var(--ng-ink-3); font-size: 12px; margin-top: 2px; }
+.main { flex: 1; min-width: 0; }
+@media (max-width: 720px) {
+  .page { flex-direction: column; }
+  .sidebar { width: 100%; max-height: 220px; }
+}
 
 .bar {
   display: flex;
@@ -293,4 +477,5 @@ button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 16p
 button:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
 
 .error { color: #b0442f; }
+.status { margin: 0 0 6px; color: var(--ng-ink-3); font-size: 13px; }
 </style>

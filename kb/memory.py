@@ -99,3 +99,13 @@ def _defer_compress(session_id: str) -> None:
     from utils.spawn import submit_background
 
     submit_background("kb-session-compress", _run)
+
+
+def list_sessions(client_id: str) -> list[dict]:
+    """client_id 名下的会话列表，按最后活跃时间倒序。字段与主站 /sessions 一致。"""
+    return ShortTermMemory().list_sessions(user_id(client_id))
+
+
+def recent_questions(client_id: str, limit: int = 20) -> list[dict]:
+    """kb 侧最近问过的原话。点一下是再问一句，不是打开旧会话。"""
+    return ShortTermMemory().recent_questions(user_id(client_id), limit=limit)

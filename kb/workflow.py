@@ -8,7 +8,8 @@ from langgraph.graph import END, START, StateGraph
 import config
 from kb.common import ABSTAIN, format_hit
 from kb.search import search_picture, search_question
-from llm import invoke_model
+from llm import invoke_model, stream_model
+from llm.streamctx import hook
 from llm.usage import purpose, span
 
 
@@ -104,8 +105,11 @@ def _generate(state: dict) -> dict:
             f"问题：{question}\n\n文档块：\n{context}"
         )
         with purpose("kb_answer"):
-            message = invoke_model(prompt, enable_thinking=False)
-        answer = (getattr(message, "content", "") or "").strip() or ABSTAIN
+            if hook() is not None:
+                answer = (stream_model(prompt, enable_thinking=False) or "").strip() or ABSTAIN
+            else:
+                message = invoke_model(prompt, enable_thinking=False)
+                answer = (getattr(message, "content", "") or "").strip() or ABSTAIN
         box.output = answer
     return {"answer": answer, "abstained": False}
 
