@@ -49,6 +49,15 @@ systemctl is-active --quiet nutri-graph \
   && echo "  nutri-graph 已启动" \
   || { echo "  启动失败，看：journalctl -u nutri-graph -n 50 --no-pager"; exit 1; }
 
+# 定时任务（幂等安装：只 enable 不 start，让 timer 自己按计划触发）
+# 注意：eval 评估已改为「管理后台手动触发」，不进定时器，这里不装 eval timer。
+for unit in daily fetch metrics; do
+  install -m 0644 "$APP_DIR/deploy/systemd/nutri-graph-$unit.service" "/etc/systemd/system/nutri-graph-$unit.service"
+  install -m 0644 "$APP_DIR/deploy/systemd/nutri-graph-$unit.timer" "/etc/systemd/system/nutri-graph-$unit.timer"
+  systemctl enable "nutri-graph-$unit.timer" >/dev/null 2>&1 && echo "  定时任务 nutri-graph-$unit.timer 已启用" || true
+done
+systemctl daemon-reload
+
 # ---------- 3. 前端静态文件 ----------
 say "3/5 部署前端"
 mkdir -p "$WEB_ROOT/assets"

@@ -175,14 +175,9 @@ def test_report_token_and_matching(client, monkeypatch, caplog):
 
 
 def _admin(client):
-    body = login(client)
-    with psycopg.connect(config.PG_DSN) as conn:
-        conn.execute(
-            "UPDATE app_user SET role = 'admin' WHERE user_id = %s",
-            (body["user"]["user_id"],),
-        )
-        conn.commit()
-    return body
+    from tests.helpers import login_console
+
+    return login_console(client)
 
 
 def test_admin_sms_list(client):

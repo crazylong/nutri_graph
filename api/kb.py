@@ -1,4 +1,4 @@
-"""企业知识库问答。不登录。没带租户不查库。"""
+"""企业知识库问答。必须是员工登录，并且属于本次请求的租户。"""
 from __future__ import annotations
 
 import logging
@@ -7,13 +7,15 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 import config
+import db
+from api.deps import get_current_user
 from kb import memory
-from kb.common import ABSTAIN, KbError, check_tenant
-from kb.store import get_chunk, list_tenants
+from kb.common import TENANT_RE, KbError
+from kb.store import get_chunk
 from kb.workflow import run_ask
 
 router = APIRouter(tags=["kb"])
@@ -29,29 +31,40 @@ def _fail(exc: KbError) -> JSONResponse:
     )
 
 
+def _tenant_for(user: dict, tenant_id: str) -> str:
+    tenant = (tenant_id or "").strip()
+    if not TENANT_RE.fullmatch(tenant):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "bad_tenant", "message": "租户只允许字母、数字、下划线，最长 32 位"},
+        )
+    if not memory.member(user["user_id"], tenant):
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "forbidden", "message": "不能访问这个租户"},
+        )
+    return tenant
+
+
 @router.get("/kb/tenants")
-def tenants():
-    try:
-        return {"tenants": list_tenants()}
-    except Exception as exc:
-        return _missing(exc)
+def tenants(user: dict = Depends(get_current_user)):
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT tenant_name FROM tenant_user WHERE user_id = %s ORDER BY 1",
+            (user["user_id"],),
+        ).fetchall()
+    return {"tenants": [row[0] for row in rows]}
 
 
 @router.post("/kb/ask")
 async def ask(
+    user: dict = Depends(get_current_user),
     tenant_id: str = Form(""),
     question: str = Form(""),
-    client_id: str = Form(""),
     session_id: str = Form(""),
     image: UploadFile | None = File(None),
 ):
-    tenant = (tenant_id or "").strip()
-    if not tenant:
-        return {"answer": ABSTAIN, "abstained": True, "hits": []}
-    try:
-        tenant = check_tenant(tenant)
-    except KbError as exc:
-        return _fail(exc)
+    tenant = _tenant_for(user, tenant_id)
     raw = await image.read() if image is not None else b""
     text = (question or "").strip()
     if not text and not raw:
@@ -59,7 +72,7 @@ async def ask(
     mime = (image.content_type if image is not None and raw else "") or "image/png"
     name = image.filename if image is not None else ""
     try:
-        sid, history = _session(client_id, session_id)
+        sid, history = _session(memory.owner(user["user_id"], tenant), session_id)
     except KbError as exc:
         return _fail(exc)
     try:
@@ -84,21 +97,15 @@ async def ask(
 
 
 @router.get("/kb/sessions")
-def kb_sessions(client_id: str = ""):
-    try:
-        cid = memory.check_client(client_id)
-    except KbError as exc:
-        return _fail(exc)
-    return {"sessions": memory.list_sessions(cid)}
+def kb_sessions(tenant_id: str = "", user: dict = Depends(get_current_user)):
+    tenant = _tenant_for(user, tenant_id)
+    return {"sessions": memory.list_sessions(memory.owner(user["user_id"], tenant))}
 
 
 @router.get("/kb/recent")
-def kb_recent(client_id: str = ""):
-    try:
-        cid = memory.check_client(client_id)
-    except KbError as exc:
-        return _fail(exc)
-    return {"questions": memory.recent_questions(cid)}
+def kb_recent(tenant_id: str = "", user: dict = Depends(get_current_user)):
+    tenant = _tenant_for(user, tenant_id)
+    return {"questions": memory.recent_questions(memory.owner(user["user_id"], tenant))}
 
 
 def _kb_slot() -> threading.Semaphore:
@@ -110,16 +117,12 @@ def _kb_slot() -> threading.Semaphore:
     return _kb_slots
 
 
-def _prepare_ask(tenant_id: str, question: str, client_id: str, session_id: str, raw: bytes, name: str):
-    """与 /kb/ask 相同的入参。没带租户时直接弃答，不开会话。"""
-    tenant = (tenant_id or "").strip()
-    if not tenant:
-        return None, {"answer": ABSTAIN, "abstained": True, "hits": []}
-    tenant = check_tenant(tenant)
+def _prepare_ask(user: dict, tenant_id: str, question: str, session_id: str, raw: bytes, name: str):
+    tenant = _tenant_for(user, tenant_id)
     text = (question or "").strip()
     if not text and not raw:
         raise HTTPException(status_code=400, detail={"code": "empty_question", "message": "请输入问题或上传一张图"})
-    sid, history = _session(client_id, session_id)
+    sid, history = _session(memory.owner(user["user_id"], tenant), session_id)
     spoken = text or name or "（上传图片）"
     return (tenant, text, sid, history, spoken), None
 
@@ -206,9 +209,9 @@ def _run_kb_stream(
 
 @router.post("/kb/ask/stream")
 async def ask_stream(
+    user: dict = Depends(get_current_user),
     tenant_id: str = Form(""),
     question: str = Form(""),
-    client_id: str = Form(""),
     session_id: str = Form(""),
     image: UploadFile | None = File(None),
 ):
@@ -216,7 +219,7 @@ async def ask_stream(
     name = image.filename if image is not None else ""
     mime = (image.content_type if image is not None and raw else "") or "image/png"
     try:
-        prepared, early = _prepare_ask(tenant_id, question, client_id, session_id, raw, name)
+        prepared, early = _prepare_ask(user, tenant_id, question, session_id, raw, name)
     except KbError as exc:
         return _fail(exc)
     if early is not None:
@@ -263,35 +266,27 @@ async def ask_stream(
 
 
 @router.get("/kb/sessions/{session_id}")
-def session_messages(session_id: str, client_id: str = ""):
+def session_messages(session_id: str, tenant_id: str = "", user: dict = Depends(get_current_user)):
+    tenant = _tenant_for(user, tenant_id)
     try:
-        return {"messages": memory.messages(client_id, session_id)}
+        return {"messages": memory.messages(memory.owner(user["user_id"], tenant), session_id)}
     except KbError as exc:
         return _fail(exc)
 
 
-def _session(client_id: str, session_id: str) -> tuple[str, str]:
-    if not (client_id or "").strip():
-        return "", ""
-    sid = memory.open_session(client_id, session_id or None)
+def _session(owner_id: str, session_id: str) -> tuple[str, str]:
+    sid = memory.open_session(owner_id, session_id or None)
     return sid, memory.history_of(sid)
 
 
 @router.get("/kb/images/{chunk_id}")
-def image(chunk_id: str, tenant_id: str = ""):
+def image(chunk_id: str, tenant_id: str = "", user: dict = Depends(get_current_user)):
+    tenant = _tenant_for(user, tenant_id)
     row = get_chunk(chunk_id)
-    if row is None or row["status"] != "approved" or row["tenant_id"] != tenant_id:
+    if row is None or row["status"] != "approved" or row["tenant_id"] != tenant:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "图片不存在"})
     path = Path(row["image_path"] or "")
     if not path.is_file():
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "图片不存在"})
     return FileResponse(path)
 
-
-def _missing(exc: Exception) -> JSONResponse:
-    if "kb_document" in str(exc):
-        return JSONResponse(
-            status_code=503,
-            content={"detail": {"code": "missing_table", "message": "请先运行 python -m scripts.migrate"}},
-        )
-    raise exc

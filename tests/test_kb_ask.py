@@ -6,9 +6,13 @@ import threading
 import time
 
 from kb.common import ABSTAIN
-from tests.helpers import requires_pg
+from tests.helpers import bearer, kb_staff, requires_pg
 
 pytestmark = requires_pg
+
+
+def _who(client, tenant="acme"):
+    return bearer(kb_staff(client, tenant)["access_token"])
 
 
 def test_missing_tenant_does_not_search(client, monkeypatch):
@@ -17,12 +21,8 @@ def test_missing_tenant_does_not_search(client, monkeypatch):
 
     monkeypatch.setattr("kb.workflow.search_question", boom)
     monkeypatch.setattr("kb.workflow.search_picture", boom)
-    response = client.post("/kb/ask", data={"question": "差旅费怎么报"})
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["abstained"] is True
-    assert body["answer"] == ABSTAIN
-    assert body["hits"] == []
+    response = client.post("/kb/ask", data={"question": "差旅费怎么报"}, headers=_who(client))
+    assert response.status_code == 422, response.text
 
 
 def test_wrong_tenant_abstains(client, monkeypatch):
@@ -32,7 +32,11 @@ def test_wrong_tenant_abstains(client, monkeypatch):
         raise AssertionError("没有命中不应该调用模型")
 
     monkeypatch.setattr("kb.workflow.invoke_model", no_model)
-    response = client.post("/kb/ask", data={"tenant_id": "nobody", "question": "差旅费怎么报"})
+    response = client.post(
+        "/kb/ask",
+        data={"tenant_id": "nobody", "question": "差旅费怎么报"},
+        headers=_who(client, "nobody"),
+    )
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["hits"] == []
@@ -51,7 +55,11 @@ def test_search_limit_follows_config(client, monkeypatch):
         return []
 
     monkeypatch.setattr("kb.workflow.search_question", spy)
-    response = client.post("/kb/ask", data={"tenant_id": "nobody", "question": "差旅费怎么报"})
+    response = client.post(
+        "/kb/ask",
+        data={"tenant_id": "nobody", "question": "差旅费怎么报"},
+        headers=_who(client, "nobody"),
+    )
     assert response.status_code == 200, response.text
     assert seen["limit"] == 2
 
@@ -80,9 +88,11 @@ def test_later_turn_keeps_recent_dialogue_and_image(client, monkeypatch):
             "score": 0.9,
         }],
     )
+    headers = _who(client)
     first = client.post(
         "/kb/ask",
-        data={"tenant_id": "acme", "question": "差旅费怎么报", "client_id": "kbclient01"},
+        data={"tenant_id": "acme", "question": "差旅费怎么报"},
+        headers=headers,
     )
     assert first.status_code == 200, first.text
     body = first.json()
@@ -96,14 +106,14 @@ def test_later_turn_keeps_recent_dialogue_and_image(client, monkeypatch):
         data={
             "tenant_id": "acme",
             "question": "那住宿呢",
-            "client_id": "kbclient01",
             "session_id": body["session_id"],
         },
+        headers=headers,
     )
     assert second.status_code == 200, second.text
     assert "差旅费怎么报" in seen["prompt"]
     assert "不能当成文档依据" in seen["prompt"]
-    saved = client.get("/kb/sessions/" + body["session_id"], params={"client_id": "kbclient01"})
+    saved = client.get("/kb/sessions/" + body["session_id"], params={"tenant_id": "acme"}, headers=headers)
     assert saved.status_code == 200, saved.text
     assert [item["role"] for item in saved.json()["messages"]] == [
         "user", "assistant", "user", "assistant",
@@ -127,11 +137,11 @@ def _hits(monkeypatch):
     monkeypatch.setattr("kb.workflow.search_question", lambda *args, **kwargs: [dict(_HIT)])
 
 
-def _ask(client, client_id, question, session_id=""):
-    data = {"tenant_id": "acme", "question": question, "client_id": client_id}
+def _ask(client, headers, question, session_id=""):
+    data = {"tenant_id": "acme", "question": question}
     if session_id:
         data["session_id"] = session_id
-    return client.post("/kb/ask", data=data)
+    return client.post("/kb/ask", data=data, headers=headers)
 
 
 def _sse_events(body: str):
@@ -155,28 +165,28 @@ def test_session_list_orders_by_last_active_and_rejects_bad_client(client, monke
     _quiet_memory(monkeypatch)
     _hits(monkeypatch)
     monkeypatch.setattr("kb.workflow.invoke_model", lambda prompt, enable_thinking=False: type("M", (), {"content": "有据。"})())
-    cid = "kbclient11"
-    first = _ask(client, cid, "第一问考勤制度")
+    headers = _who(client)
+    first = _ask(client, headers, "第一问考勤制度")
     assert first.status_code == 200, first.text
-    second = _ask(client, cid, "第二问加班费")
+    second = _ask(client, headers, "第二问加班费")
     assert second.status_code == 200, second.text
-    listed = client.get("/kb/sessions", params={"client_id": cid})
+    listed = client.get("/kb/sessions", params={"tenant_id": "acme"}, headers=headers)
     assert listed.status_code == 200, listed.text
     rows = listed.json()["sessions"]
     assert [row["id"] for row in rows[:2]] == [second.json()["session_id"], first.json()["session_id"]]
     assert rows[0]["title"] == "第二问加班费"
-    bad = client.get("/kb/sessions", params={"client_id": "no"})
-    assert bad.status_code == 400, bad.text
+    bad = client.get("/kb/sessions", params={"tenant_id": "acme"})
+    assert bad.status_code == 401, bad.text
 
 
 def test_recent_questions_are_newest_first(client, monkeypatch):
     _quiet_memory(monkeypatch)
     _hits(monkeypatch)
     monkeypatch.setattr("kb.workflow.invoke_model", lambda prompt, enable_thinking=False: type("M", (), {"content": "有据。"})())
-    cid = "kbclient12"
-    _ask(client, cid, "先问差旅")
-    _ask(client, cid, "再问住宿")
-    listed = client.get("/kb/recent", params={"client_id": cid})
+    headers = _who(client)
+    _ask(client, headers, "先问差旅")
+    _ask(client, headers, "再问住宿")
+    listed = client.get("/kb/recent", params={"tenant_id": "acme"}, headers=headers)
     assert listed.status_code == 200, listed.text
     questions = [row["question"] for row in listed.json()["questions"]]
     assert questions[:2] == ["再问住宿", "先问差旅"]
@@ -186,10 +196,12 @@ def test_sessions_stay_inside_one_client(client, monkeypatch):
     _quiet_memory(monkeypatch)
     _hits(monkeypatch)
     monkeypatch.setattr("kb.workflow.invoke_model", lambda prompt, enable_thinking=False: type("M", (), {"content": "有据。"})())
-    _ask(client, "kbclient13", "甲的问题")
-    _ask(client, "kbclient14", "乙的问题")
-    left = client.get("/kb/sessions", params={"client_id": "kbclient13"})
-    right = client.get("/kb/sessions", params={"client_id": "kbclient14"})
+    left_headers = _who(client)
+    right_headers = _who(client)
+    _ask(client, left_headers, "甲的问题")
+    _ask(client, right_headers, "乙的问题")
+    left = client.get("/kb/sessions", params={"tenant_id": "acme"}, headers=left_headers)
+    right = client.get("/kb/sessions", params={"tenant_id": "acme"}, headers=right_headers)
     left_titles = [row["title"] for row in left.json()["sessions"]]
     right_titles = [row["title"] for row in right.json()["sessions"]]
     assert "甲的问题" in left_titles
@@ -235,10 +247,11 @@ def test_stream_emits_deltas_and_saves_hits(client, monkeypatch):
         return "没有句号的回答"
 
     monkeypatch.setattr("kb.workflow.stream_model", fake_stream)
-    cid = "kbclient15"
+    headers = _who(client)
     first = client.post(
         "/kb/ask/stream",
-        data={"tenant_id": "acme", "question": "考勤怎么算", "client_id": cid},
+        data={"tenant_id": "acme", "question": "考勤怎么算"},
+        headers=headers,
     )
     assert first.status_code == 200, first.text
     assert "text/event-stream" in (first.headers.get("content-type") or "")
@@ -258,18 +271,18 @@ def test_stream_emits_deltas_and_saves_hits(client, monkeypatch):
         data={
             "tenant_id": "acme",
             "question": "那加班呢",
-            "client_id": cid,
             "session_id": result["session_id"],
         },
+        headers=headers,
     )
     assert second.status_code == 200, second.text
     assert "考勤怎么算" in seen["prompt"]
-    saved = client.get("/kb/sessions/" + result["session_id"], params={"client_id": cid})
+    saved = client.get("/kb/sessions/" + result["session_id"], params={"tenant_id": "acme"}, headers=headers)
     assert saved.status_code == 200, saved.text
     messages = saved.json()["messages"]
     assert [item["role"] for item in messages] == ["user", "assistant", "user", "assistant"]
     assert messages[1]["hits"][0]["text"] == "加班按小时计。"
-    listed = client.get("/kb/sessions", params={"client_id": cid})
+    listed = client.get("/kb/sessions", params={"tenant_id": "acme"}, headers=headers)
     assert listed.json()["sessions"][0]["id"] == result["session_id"]
 
 
@@ -296,22 +309,23 @@ def test_stream_cancel_does_not_save_messages(client, monkeypatch):
         raise AssertionError("取消没有传到生成线程")
 
     monkeypatch.setattr("kb.workflow.stream_model", fake_stream)
-    cid = "kbclient16"
+    headers = _who(client)
     response = client.post(
         "/kb/ask/stream",
-        data={"tenant_id": "acme", "question": "这轮不该落库", "client_id": cid},
+        data={"tenant_id": "acme", "question": "这轮不该落库"},
+        headers=headers,
     )
     assert response.status_code == 200, response.text
     names = [event for event, _data in _sse_events(response.text)]
     assert "error" in names
     assert "生成中断" in response.text
     assert "done" in names
-    listed = client.get("/kb/sessions", params={"client_id": cid})
+    listed = client.get("/kb/sessions", params={"tenant_id": "acme"}, headers=headers)
     assert listed.status_code == 200, listed.text
     rows = listed.json()["sessions"]
     assert rows
     for row in rows:
-        saved = client.get("/kb/sessions/" + row["id"], params={"client_id": cid})
+        saved = client.get("/kb/sessions/" + row["id"], params={"tenant_id": "acme"}, headers=headers)
         assert saved.status_code == 200, saved.text
         assert saved.json()["messages"] == []
 
@@ -329,9 +343,11 @@ def test_stream_model_failure_finishes_and_releases_slot(client, monkeypatch):
         raise LLMUnavailableError("池空了")
 
     monkeypatch.setattr("kb.workflow.stream_model", boom)
+    headers = _who(client)
     failed = client.post(
         "/kb/ask/stream",
-        data={"tenant_id": "acme", "question": "模型挂了", "client_id": "kbclient17"},
+        data={"tenant_id": "acme", "question": "模型挂了"},
+        headers=headers,
     )
     assert failed.status_code == 200, failed.text
     names = [event for event, _data in _sse_events(failed.text)]
@@ -344,7 +360,8 @@ def test_stream_model_failure_finishes_and_releases_slot(client, monkeypatch):
     monkeypatch.setattr("kb.workflow.stream_model", ok)
     again = client.post(
         "/kb/ask/stream",
-        data={"tenant_id": "acme", "question": "再试一次", "client_id": "kbclient18"},
+        data={"tenant_id": "acme", "question": "再试一次"},
+        headers=headers,
     )
     assert again.status_code == 200, again.text
     assert "text/event-stream" in (again.headers.get("content-type") or "")

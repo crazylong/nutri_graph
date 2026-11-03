@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import config
-from tests.helpers import bearer, login, rand_phone, requires_pg, send_code
+from tests.helpers import bearer, login, login_console, rand_phone, requires_pg, send_code
 
 pytestmark = requires_pg
 
@@ -87,7 +87,7 @@ def test_logout_revokes_only_that_refresh(client):
 
 
 def test_delete_me_purges_and_revokes(client):
-    tokens = login(client)
+    tokens = login_console(client)
     access = tokens["access_token"]
     assert client.get("/auth/me", headers=bearer(access)).status_code == 200
 
@@ -121,3 +121,71 @@ def test_auth_required_blocks_fake_uid_and_anon(client, monkeypatch):
     )
     # 已登录：鉴权放行，走到空问题校验（400）而不是 401
     assert r.status_code == 400
+
+
+def test_existing_user_console_login_does_not_promote(client, monkeypatch):
+    monkeypatch.setattr(config, "SMS_INTERVAL_S", 0)
+    admin = login_console(client)
+    phone = rand_phone()
+    created = client.post(
+        "/admin/users",
+        headers=bearer(admin["access_token"]),
+        json={"phone": phone, "username": "甲", "role": "user"},
+    )
+    assert created.status_code == 200, created.text
+    code = send_code(client, phone)
+    denied = client.post("/auth/token", json={"phone": phone, "code": code, "console": True})
+    assert denied.status_code == 403
+    listed = client.get("/admin/users", headers=bearer(admin["access_token"]), params={"phone": phone})
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"][0]["role"] == "user"
+
+
+def test_kb_login_same_message_for_missing_and_wrong_tenant(client, monkeypatch):
+    monkeypatch.setattr(config, "SMS_INTERVAL_S", 0)
+    admin = login_console(client)
+    code = send_code(client, admin["_phone"])
+    ok = client.post(
+        "/auth/token",
+        json={"phone": admin["_phone"], "code": code, "no_create": True, "tenant": "default_renter"},
+    )
+    assert ok.status_code == 200, ok.text
+    code = send_code(client, admin["_phone"])
+    wrong = client.post(
+        "/auth/token",
+        json={"phone": admin["_phone"], "code": code, "no_create": True, "tenant": "not_joined"},
+    )
+    assert wrong.status_code == 401
+    assert wrong.json()["detail"]["message"] == "用户不存在"
+
+    stranger = rand_phone()
+    code = send_code(client, stranger)
+    missing = client.post(
+        "/auth/token",
+        json={"phone": stranger, "code": code, "no_create": True, "tenant": "default_renter"},
+    )
+    assert missing.status_code == 401
+    assert missing.json()["detail"]["message"] == "用户不存在"
+
+    headers = bearer(ok.json()["access_token"])
+    blocked = client.post("/kb/ask", data={"tenant_id": "not_joined", "question": "制度"}, headers=headers)
+    assert blocked.status_code == 403
+
+
+def test_customer_and_staff_are_separate(client, monkeypatch):
+    monkeypatch.setattr(config, "SMS_INTERVAL_S", 0)
+    phone = rand_phone()
+    customer = login(client, phone)
+    assert client.get("/auth/me", headers=bearer(customer["access_token"])).status_code == 401
+    principal = client.get("/auth/principal", headers=bearer(customer["access_token"]))
+    assert principal.status_code == 200
+    assert principal.json()["kind"] == "user"
+    chat = client.post("/chat", json={"question": ""}, headers=bearer(customer["access_token"]))
+    assert chat.status_code == 400
+
+    staff = login_console(client, phone)
+    assert staff["user"]["role"] == "admin"
+    assert staff["user"]["user_id"] != customer["user"]["user_id"]
+    blocked = client.post("/chat", json={"question": "你好"}, headers=bearer(staff["access_token"]))
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"]["code"] == "staff_token"

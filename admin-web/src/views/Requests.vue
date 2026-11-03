@@ -361,7 +361,7 @@ onMounted(reload)
 </script>
 
 <style scoped>
-.bar, .filters, .actions { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.bar, .actions { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
 .bar h2 { margin: 0; flex: 1; }
 .hit { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
 .why { color: #909399; font-size: 13px; flex: 1; }

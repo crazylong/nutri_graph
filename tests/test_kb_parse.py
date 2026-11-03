@@ -75,3 +75,56 @@ def test_pdf_body_comes_from_the_file(tmp_path: Path):
     text = "\n".join(block["text"] for block in blocks)
     assert "差旅费按票据实报" in text
     assert any(block["page_no"] == 1 for block in blocks)
+
+
+def _text_block(text: str, heading: str = "") -> dict:
+    return {
+        "block_kind": "text",
+        "text": text,
+        "heading_path": heading,
+        "page_no": None,
+        "bbox": None,
+        "image_bytes": None,
+        "image_ext": "",
+        "image_name": "",
+    }
+
+
+def test_qa_kind_keeps_question_and_answer_in_one_chunk():
+    body = "Q: 差旅费怎么报销？\nA: 登录 OA 提交单据。\n问：多久到账？\n答：三个工作日。"
+    blocks = prepare([_text_block(body)], "qa")
+    assert len(blocks) == 2
+    assert blocks[0]["text"].startswith("Q: 差旅费怎么报销？")
+    assert "登录 OA 提交单据" in blocks[0]["text"]
+    assert blocks[1]["text"].startswith("问：多久到账？")
+    assert "三个工作日" in blocks[1]["text"]
+
+
+def test_qa_kind_prefixes_question_heading():
+    blocks = prepare([_text_block("差旅费按票据实报。", "制度 / 如何报销差旅费？")], "qa")
+    assert blocks[0]["text"] == "问：如何报销差旅费？\n差旅费按票据实报。"
+    assert blocks[0]["heading_path"] == "制度 / 如何报销差旅费？"
+
+
+def test_non_qa_kind_does_not_split_pairs():
+    body = "Q: 差旅费怎么报销？\nA: 登录 OA 提交单据。"
+    blocks = prepare([_text_block(body)], "policy")
+    assert len(blocks) == 1
+    assert blocks[0]["text"] == body
+
+
+def test_qa_long_answer_splits_but_repeats_question(monkeypatch):
+    monkeypatch.setattr("config.KB_CHUNK_CHARS", 40)
+    monkeypatch.setattr("config.KB_CHUNK_OVERLAP", 8)
+    body = "Q: 年假怎么算？\n" + "入职满一年享受五天年假。" * 6
+    blocks = prepare([_text_block(body)], "qa")
+    assert len(blocks) > 1
+    assert all(block["text"].startswith("Q: 年假怎么算？") for block in blocks)
+
+
+def test_check_kind_accepts_qa():
+    from kb.common import check_kind
+
+    assert check_kind("qa") == "qa"
+    with pytest.raises(Exception):
+        check_kind("faq")

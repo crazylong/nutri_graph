@@ -56,3 +56,5 @@ data/nutrient_drift.json
 # 外部数据包（中国食物成分表抓取结果等）：体积大、有版权限制，不进仓库。
 # 需要时从 fcd_crawler 抓一份放到这里，或用 scripts/import_fcd.py --file 指定。
 data/external/
+
+testdata/

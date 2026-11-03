@@ -9,23 +9,15 @@ from psycopg.types.json import Jsonb
 
 import config
 from kg.request import register
-from tests.helpers import bearer, login, requires_pg
+from tests.helpers import bearer, login, login_console, rand_phone, requires_pg
 
 pytestmark = requires_pg
-
-
-def _promote(user_id: str) -> None:
-    import psycopg
-
-    with psycopg.connect(config.PG_DSN) as conn:
-        conn.execute("UPDATE app_user SET role = 'admin' WHERE user_id = %s", (user_id,))
 
 
 def test_normal_user_forbidden(client):
     tokens = login(client)
     r = client.get("/admin/stats", headers=bearer(tokens["access_token"]))
-    assert r.status_code == 403
-    assert r.json()["detail"]["code"] == "forbidden"
+    assert r.status_code == 401
 
 
 def test_anonymous_unauthorized(client):
@@ -39,8 +31,7 @@ def test_no_token_unauthorized(client):
 
 
 def test_admin_reads_stats(client):
-    tokens = login(client)
-    _promote(tokens["user"]["user_id"])
+    tokens = login_console(client)
     r = client.get("/admin/stats", headers=bearer(tokens["access_token"]))
     assert r.status_code == 200, r.text
     body = r.json()
@@ -51,8 +42,7 @@ def test_admin_reads_stats(client):
 
 def test_candidates_endpoint_degrades_cleanly(client):
     """kg_candidate 由 migrations/002_business.sql 建：没建时给 503 + 指引，不能 500。"""
-    tokens = login(client)
-    _promote(tokens["user"]["user_id"])
+    tokens = login_console(client)
     r = client.get("/admin/kg/candidates", headers=bearer(tokens["access_token"]))
     assert r.status_code in (200, 503)
     if r.status_code == 503:
@@ -64,8 +54,7 @@ def test_candidates_endpoint_degrades_cleanly(client):
 
 @pytest.mark.parametrize("bad_status", ["unknown", "delete from users", "Pending"])
 def test_candidates_status_validated(client, bad_status):
-    tokens = login(client)
-    _promote(tokens["user"]["user_id"])
+    tokens = login_console(client)
     r = client.get(
         "/admin/kg/candidates",
         params={"status": bad_status},
@@ -76,8 +65,7 @@ def test_candidates_status_validated(client, bad_status):
 
 
 def _admin(client):
-    tokens = login(client)
-    _promote(tokens["user"]["user_id"])
+    tokens = login_console(client)
     return tokens, bearer(tokens["access_token"])
 
 
@@ -116,7 +104,7 @@ def test_console_login_becomes_admin(client):
 def test_normal_user_cannot_list_requests(client):
     tokens = login(client)
     r = client.get("/admin/kg/requests", headers=bearer(tokens["access_token"]))
-    assert r.status_code == 403
+    assert r.status_code == 401
 
 
 def test_admin_register_skips_user_daily_limit(client, monkeypatch):
@@ -293,3 +281,60 @@ def test_candidate_list_includes_sources(client):
         if candidate_id is not None:
             with psycopg.connect(config.PG_DSN) as conn:
                 conn.execute("DELETE FROM kg_candidate WHERE id = %s", (candidate_id,))
+
+
+def test_user_tenant_and_customer_admin(client):
+    headers = bearer(login_console(client)["access_token"])
+    phone = rand_phone()
+    created = client.post(
+        "/admin/users",
+        headers=headers,
+        json={"phone": phone, "username": "演示", "role": "user"},
+    )
+    assert created.status_code == 200, created.text
+    user_id = created.json()["user_id"]
+    again = client.post(
+        "/admin/users",
+        headers=headers,
+        json={"phone": phone, "username": "重复", "role": "admin"},
+    )
+    assert again.status_code == 409
+    assert again.json()["detail"]["code"] == "phone_exists"
+
+    members = client.get("/admin/tenants/default_renter/users", headers=headers)
+    assert members.status_code == 200, members.text
+    assert user_id in [item["user_id"] for item in members.json()["items"]]
+
+    promoted = client.put(
+        f"/admin/users/{user_id}",
+        headers=headers,
+        json={"role": "admin"},
+    )
+    assert promoted.status_code == 200, promoted.text
+    assert promoted.json()["role"] == "admin"
+    demoted = client.put(
+        f"/admin/users/{user_id}",
+        headers=headers,
+        json={"role": "user"},
+    )
+    assert demoted.status_code == 403
+    removed = client.delete(f"/admin/users/{user_id}", headers=headers)
+    assert removed.status_code == 409
+
+    protected = client.delete("/admin/tenants/default_renter", headers=headers)
+    assert protected.status_code == 409
+    tenant_name = "t" + phone[-8:]
+    made = client.post("/admin/tenants", headers=headers, json={"name": tenant_name})
+    assert made.status_code == 200, made.text
+    gone = client.delete(f"/admin/tenants/{tenant_name}", headers=headers)
+    assert gone.status_code == 200, gone.text
+
+    customer = login(client)
+    listed = client.get(
+        "/admin/customers",
+        headers=headers,
+        params={"phone": customer["_phone"]},
+    )
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"][0]["phone_mask"] == customer["user"]["phone_mask"]
+    assert customer["_phone"] not in listed.text

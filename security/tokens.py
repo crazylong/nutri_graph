@@ -42,13 +42,13 @@ def _now() -> dt.datetime:
 # ============================================================
 # access token
 # ============================================================
-def make_access(user_id: str, role: str) -> tuple[str, int]:
+def make_access(user_id: str, role: str, typ: str = "access") -> tuple[str, int]:
     now = _now()
     exp = now + dt.timedelta(seconds=config.ACCESS_TTL_S)
     payload = {
         "sub": str(user_id),
         "role": role,
-        "typ": "access",
+        "typ": typ,
         "iss": config.JWT_ISSUER,
         "jti": uuid.uuid4().hex,
         "iat": int(now.timestamp()),
@@ -58,9 +58,9 @@ def make_access(user_id: str, role: str) -> tuple[str, int]:
     return token, config.ACCESS_TTL_S
 
 
-def decode_access(token: str) -> dict:
+def decode_claims(token: str) -> dict:
     try:
-        claims = jwt.decode(
+        return jwt.decode(
             token,
             jwt_secret(),
             algorithms=[config.JWT_ALG],
@@ -71,7 +71,18 @@ def decode_access(token: str) -> dict:
         raise InvalidTokenError("令牌已过期，请刷新或重新登录") from exc
     except jwt.InvalidTokenError as exc:
         raise InvalidTokenError("令牌无效") from exc
+
+
+def decode_access(token: str) -> dict:
+    claims = decode_claims(token)
     if claims.get("typ") != "access":
+        raise InvalidTokenError("令牌类型不正确")
+    return claims
+
+
+def decode_customer(token: str) -> dict:
+    claims = decode_claims(token)
+    if claims.get("typ") != "customer":
         raise InvalidTokenError("令牌类型不正确")
     return claims
 
@@ -79,25 +90,28 @@ def decode_access(token: str) -> dict:
 # ============================================================
 # refresh token
 # ============================================================
-def _store_refresh(conn, user_id: str, family_id: str, expires_at: dt.datetime) -> tuple[str, str]:
+_STAFF_REFRESH = "refresh_token"
+_CUSTOMER_REFRESH = "customer_refresh"
+
+
+def _store_refresh(conn, table: str, user_id: str, family_id: str, expires_at: dt.datetime) -> tuple[str, str]:
     """写入一条 refresh，返回 (明文, jti)。明文只在这一刻存在，库里只有哈希。"""
     raw = new_token(32)
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO refresh_token (user_id, token_hash, family_id, expires_at) "
+        f"INSERT INTO {table} (user_id, token_hash, family_id, expires_at) "
         "VALUES (%s, %s, %s, %s) RETURNING jti",
         (user_id, sha256_hex(raw), family_id, expires_at),
     )
     return raw, str(cur.fetchone()[0])
 
 
-def issue_tokens(user_id: str, role: str) -> dict:
-    """登录成功：新建一个 family，签发 access + refresh。"""
+def _issue(user_id: str, role: str, table: str, typ: str) -> dict:
     expires_at = _now() + dt.timedelta(days=config.REFRESH_TTL_D)
     family_id = str(uuid.uuid4())
     with db.connect() as conn:
-        refresh, _ = _store_refresh(conn, user_id, family_id, expires_at)
-    access, ttl = make_access(user_id, role)
+        refresh, _ = _store_refresh(conn, table, user_id, family_id, expires_at)
+    access, ttl = make_access(user_id, role, typ)
     return {
         "access_token": access,
         "refresh_token": refresh,
@@ -106,10 +120,38 @@ def issue_tokens(user_id: str, role: str) -> dict:
     }
 
 
-def rotate_refresh(raw_refresh: str) -> dict:
-    """用 refresh 换新的一对令牌（旋转）。检测到重放则吊销整族。
+def issue_tokens(user_id: str, role: str) -> dict:
+    """员工登录成功：新建一个 family，签发 access + refresh。"""
+    return _issue(user_id, role, _STAFF_REFRESH, "access")
 
-    注意：吊销必须在退出 with 块（提交）之后再抛异常 ——
+
+def issue_customer_tokens(user_id: str) -> dict:
+    """企业客户登录成功。刷新令牌写 customer_refresh，不进员工表。"""
+    return _issue(user_id, "user", _CUSTOMER_REFRESH, "customer")
+
+
+def _staff_role(conn, user_id: str) -> str:
+    cur = conn.cursor()
+    cur.execute("SELECT role, status FROM app_user WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    if row is None or row[1] != "active":
+        raise InvalidTokenError("账号不可用")
+    return row[0]
+
+
+def _customer_role(conn, user_id: str) -> str:
+    cur = conn.cursor()
+    cur.execute("SELECT status FROM customer WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    if row is None or row[0] != "active":
+        raise InvalidTokenError("账号不可用")
+    return "user"
+
+
+def _rotate_in(raw_refresh: str, table: str, load_role, typ: str) -> dict | None:
+    """在一张刷新表里旋转。哈希不存在时返回 None，调用方再查另一张表。
+
+    吊销必须在退出 with 块（提交）之后再抛异常 ——
     在 with 内抛异常会触发 psycopg 回滚，吊销动作会一起被撤销，
     等于「检测到泄露却没真正封掉」。
     """
@@ -120,13 +162,13 @@ def rotate_refresh(raw_refresh: str) -> dict:
     with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT jti, user_id, family_id, expires_at, revoked_at, replaced_by "
-            "FROM refresh_token WHERE token_hash = %s",
+            f"SELECT jti, user_id, family_id, expires_at, revoked_at, replaced_by "
+            f"FROM {table} WHERE token_hash = %s",
             (token_hash,),
         )
         row = cur.fetchone()
         if row is None:
-            raise InvalidTokenError("刷新令牌不存在")
+            return None
 
         jti, user_id, family_id, expires_at, revoked_at, replaced_by = row
 
@@ -134,30 +176,22 @@ def rotate_refresh(raw_refresh: str) -> dict:
             # 两种「已吊销」必须分开，否则正常登出会被当成攻击：
             #   replaced_by 有值 = 它已经被旋转换掉了，现在又被拿出来用 → 真·重放，整族封掉
             #   replaced_by 为空 = 登出/强制下线/注销吊销的 → 只是会话结束了，提示重新登录
-            # 判错的代价：用户点了退出，下次回来看到「检测到异常登录」，
-            # 会以为账号被盗，而实际上什么都没发生。
             if replaced_by is None:
                 raise InvalidTokenError("登录已失效，请重新登录")
             conn.execute(
-                "UPDATE refresh_token SET revoked_at = now() "
+                f"UPDATE {table} SET revoked_at = now() "
                 "WHERE family_id = %s AND revoked_at IS NULL",
                 (family_id,),
             )
             reuse_family = str(family_id)
         elif expires_at < _now():
             raise InvalidTokenError("刷新令牌已过期，请重新登录")
-
         else:
-            cur.execute("SELECT role, status FROM app_user WHERE user_id = %s", (user_id,))
-            urow = cur.fetchone()
-            if urow is None or urow[1] != "active":
-                raise InvalidTokenError("账号不可用")
-            role = urow[0]
-
+            role = load_role(conn, str(user_id))
             new_expires = _now() + dt.timedelta(days=config.REFRESH_TTL_D)
-            new_refresh, new_jti = _store_refresh(conn, str(user_id), str(family_id), new_expires)
+            new_refresh, new_jti = _store_refresh(conn, table, str(user_id), str(family_id), new_expires)
             conn.execute(
-                "UPDATE refresh_token SET revoked_at = now(), replaced_by = %s WHERE jti = %s",
+                f"UPDATE {table} SET revoked_at = now(), replaced_by = %s WHERE jti = %s",
                 (new_jti, jti),
             )
             issued = (str(user_id), role, new_refresh)
@@ -168,7 +202,7 @@ def rotate_refresh(raw_refresh: str) -> dict:
 
     assert issued is not None
     user_id_s, role_s, refresh_s = issued
-    access, ttl = make_access(user_id_s, role_s)
+    access, ttl = make_access(user_id_s, role_s, typ)
     return {
         "access_token": access,
         "refresh_token": refresh_s,
@@ -177,18 +211,31 @@ def rotate_refresh(raw_refresh: str) -> dict:
     }
 
 
+def rotate_refresh(raw_refresh: str) -> dict:
+    """用 refresh 换新的一对令牌。先查员工表，没有再查客户表。"""
+    found = _rotate_in(raw_refresh, _STAFF_REFRESH, _staff_role, "access")
+    if found is not None:
+        return found
+    found = _rotate_in(raw_refresh, _CUSTOMER_REFRESH, _customer_role, "customer")
+    if found is None:
+        raise InvalidTokenError("刷新令牌不存在")
+    return found
+
+
 def revoke_refresh(raw_refresh: str) -> None:
     """登出：只吊销这一条（不动 family，避免影响用户其他设备）。"""
+    token_hash = sha256_hex(raw_refresh)
     with db.connect() as conn:
-        conn.execute(
-            "UPDATE refresh_token SET revoked_at = now() "
-            "WHERE token_hash = %s AND revoked_at IS NULL",
-            (sha256_hex(raw_refresh),),
-        )
+        for table in (_STAFF_REFRESH, _CUSTOMER_REFRESH):
+            conn.execute(
+                f"UPDATE {table} SET revoked_at = now() "
+                "WHERE token_hash = %s AND revoked_at IS NULL",
+                (token_hash,),
+            )
 
 
 def revoke_all_for_user(user_id: str) -> int:
-    """注销账号 / 强制下线：吊销该用户全部 refresh。"""
+    """注销账号 / 强制下线：吊销该员工全部 refresh。"""
     with db.connect() as conn:
         cur = conn.cursor()
         cur.execute(

@@ -15,6 +15,10 @@ import KbDocs from './views/KbDocs.vue'
 import KbReview from './views/KbReview.vue'
 import SmsLogs from './views/SmsLogs.vue'
 import Trace from './views/Trace.vue'
+import Users from './views/Users.vue'
+import Tenants from './views/Tenants.vue'
+import Customers from './views/Customers.vue'
+import Guide from './views/Guide.vue'
 import { tokens } from './api'
 
 const router = createRouter({
@@ -26,6 +30,7 @@ const router = createRouter({
       component: Layout,
       children: [
         { path: '', redirect: '/overview' },
+        { path: 'guide', component: Guide },
         { path: 'overview', component: Overview },
         { path: 'trace', component: Trace },
         { path: 'requests', component: Requests },
@@ -40,6 +45,9 @@ const router = createRouter({
         { path: 'kb', component: KbDocs },
         { path: 'kb-review', component: KbReview },
         { path: 'sms', component: SmsLogs },
+        { path: 'users', component: Users },
+        { path: 'tenants', component: Tenants },
+        { path: 'customers', component: Customers },
       ],
     },
   ],

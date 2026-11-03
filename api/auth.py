@@ -33,10 +33,12 @@ from memory.anonymous_merge import merge_anon_into_user
 from security import captcha, ratelimit
 from security.crypto import encrypt_phone, phone_hash, phone_mask
 from security.sms import SmsConfigError, SmsProvider, get_provider
+from kb.common import DEFAULT_TENANT, TENANT_RE
 from security.tokens import (
     InvalidTokenError,
     TokenReuseError,
     decode_anon,
+    issue_customer_tokens,
     issue_tokens,
     make_anon,
     revoke_all_for_user,
@@ -70,8 +72,12 @@ class TokenRequest(BaseModel):
         "", description="未登录期间拿到的匿名令牌；带上则把匿名数据归并到本账号"
     )
     console: bool = Field(
-        False, description="管理后台登录。为真时把该账号设为 admin，方便演示"
+        False, description="管理后台登录。新用户建成管理员；已有普通用户拒绝"
     )
+    no_create: bool = Field(
+        False, description="知识库登录。为真时不建号，并校验租户归属"
+    )
+    tenant: str = Field("", description="知识库登录必填的租户名")
 
 
 class RefreshRequest(BaseModel):
@@ -106,50 +112,15 @@ def _require_valid_phone(raw: str) -> str:
     return phone
 
 
-def _upsert_user(phone: str) -> dict:
-    """建号或登录。已注销的账号再次登录视为重新注册（PII 已在注销时清空）。"""
-    ph = phone_hash(phone)
-    enc = encrypt_phone(phone)
-    mask = phone_mask(phone)
-    with db.connect() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO app_user (phone_enc, phone_hash, phone_mask) VALUES (%s, %s, %s) "
-            "ON CONFLICT (phone_hash) DO UPDATE SET "
-            "  phone_enc = EXCLUDED.phone_enc,"
-            "  phone_mask = EXCLUDED.phone_mask,"
-            "  last_login_at = now(),"
-            "  status = CASE WHEN app_user.status = 'deleted' THEN 'active' ELSE app_user.status END,"
-            "  deleted_at = CASE WHEN app_user.status = 'deleted' THEN NULL ELSE app_user.deleted_at END "
-            "RETURNING user_id, role, status",
-            (enc, ph, mask),
-        )
-        user_id, role, status = cur.fetchone()
-
-    if status != "active":
-        raise HTTPException(
-            status_code=403,
-            detail={"code": "account_locked", "message": "账号已被限制，请联系管理员"},
-        )
-    return {"user_id": str(user_id), "role": role, "phone_mask": mask}
-
-
-def _grant_admin(user_id: str) -> None:
-    """管理后台登录直接给 admin。问答登录不走这里。"""
-    with db.connect() as conn:
-        conn.execute(
-            "UPDATE app_user SET role = 'admin' WHERE user_id = %s",
-            (user_id,),
-        )
-
-
-def _record_consent(user_id: str, version: str, ip: str) -> None:
+def _record_consent(user_id: str, version: str, ip: str, table: str = "user_consent") -> None:
     if not version:
         return
+    if table not in ("user_consent", "customer_consent"):
+        raise RuntimeError(f"未知同意记录表 {table}")
     try:
         with db.connect() as conn:
             conn.execute(
-                "INSERT INTO user_consent (user_id, policy_version, ip) VALUES (%s, %s, %s) "
+                f"INSERT INTO {table} (user_id, policy_version, ip) VALUES (%s, %s, %s) "
                 "ON CONFLICT (user_id, policy_version) DO NOTHING",
                 (user_id, version, ip),
             )
@@ -278,6 +249,150 @@ def send_sms(req: SmsRequest, request: Request):
     return body
 
 
+def _locked() -> None:
+    raise HTTPException(
+        status_code=403,
+        detail={"code": "account_locked", "message": "账号已被限制，请联系管理员"},
+    )
+
+
+def _public_user(user: dict) -> dict:
+    return {
+        "user_id": user["user_id"],
+        "role": user["role"],
+        "phone_mask": user["phone_mask"],
+    }
+
+
+def _merge_anon(anon_token: str, user_id: str):
+    if not anon_token:
+        return None
+    try:
+        anon_claims = decode_anon(anon_token)
+        return merge_anon_into_user(anon_claims["sub"], user_id)
+    except InvalidTokenError as exc:
+        log.info("匿名令牌无效，跳过归并：%s", exc)
+        return {"skipped": True, "errors": [str(exc)]}
+    except Exception as exc:  # noqa: BLE001 —— 归并失败绝不能让登录失败
+        log.error("匿名归并异常 user=%s：%s", user_id, exc)
+        return {"skipped": True, "errors": [str(exc)[:200]]}
+
+
+def _login_console(phone: str) -> dict:
+    """后台登录。只有新号建成管理员；已经是普通用户的不升权。"""
+    ph = phone_hash(phone)
+    enc = encrypt_phone(phone)
+    mask = phone_mask(phone)
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, role, status FROM app_user WHERE phone_hash = %s",
+            (ph,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            cur.execute(
+                "INSERT INTO app_user (phone_enc, phone_hash, phone_mask, role) "
+                "VALUES (%s, %s, %s, 'admin') RETURNING user_id",
+                (enc, ph, mask),
+            )
+            user_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO tenant_user (tenant_name, user_id) VALUES (%s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (DEFAULT_TENANT, user_id),
+            )
+            return {
+                "user_id": str(user_id),
+                "role": "admin",
+                "phone_mask": mask,
+                "status": "active",
+            }
+        user_id, role, status = row
+        if status != "active":
+            _locked()
+        if role != "admin":
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "forbidden", "message": "需要管理员权限"},
+            )
+        cur.execute(
+            "UPDATE app_user SET last_login_at = now() WHERE user_id = %s",
+            (user_id,),
+        )
+    return {
+        "user_id": str(user_id),
+        "role": role,
+        "phone_mask": mask,
+        "status": status,
+    }
+
+
+def _login_kb(phone: str, tenant: str) -> dict:
+    """知识库登录。不建号。人不存在或不属于该租户，都说用户不存在。"""
+    name = (tenant or "").strip()
+    if not TENANT_RE.fullmatch(name):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "bad_tenant", "message": "租户只允许字母、数字、下划线，最长 32 位"},
+        )
+    ph = phone_hash(phone)
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, role, status, phone_mask FROM app_user WHERE phone_hash = %s",
+            (ph,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "user_not_found", "message": "用户不存在"},
+            )
+        user_id, role, status, mask = row
+        if status != "active":
+            _locked()
+        cur.execute(
+            "SELECT 1 FROM tenant_user WHERE tenant_name = %s AND user_id = %s",
+            (name, user_id),
+        )
+        if cur.fetchone() is None:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "user_not_found", "message": "用户不存在"},
+            )
+    return {
+        "user_id": str(user_id),
+        "role": role,
+        "phone_mask": mask,
+        "status": status,
+        "tenant": name,
+    }
+
+
+def _upsert_customer(phone: str) -> dict:
+    """食疗前台登录。只写 customer，不碰员工表。"""
+    ph = phone_hash(phone)
+    enc = encrypt_phone(phone)
+    mask = phone_mask(phone)
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO customer (phone_enc, phone_hash, phone_mask, last_login_at) "
+            "VALUES (%s, %s, %s, now()) "
+            "ON CONFLICT (phone_hash) DO UPDATE SET "
+            "  phone_enc = EXCLUDED.phone_enc, "
+            "  phone_mask = EXCLUDED.phone_mask, "
+            "  last_login_at = now() "
+            "RETURNING user_id, status",
+            (enc, ph, mask),
+        )
+        user_id, status = cur.fetchone()
+    if status != "active":
+        _locked()
+    return {"user_id": str(user_id), "role": "user", "phone_mask": mask, "status": status}
+
+
 # ============================================================
 # 验证码换令牌
 # ============================================================
@@ -306,27 +421,22 @@ def exchange_token(req: TokenRequest, request: Request):
             },
         )
 
-    user = _upsert_user(phone)
+    if req.no_create:
+        user = _login_kb(phone, req.tenant)
+        tokens = issue_tokens(user["user_id"], user["role"])
+        return {**tokens, "user": _public_user(user), "tenant": user["tenant"]}
+
     if req.console:
-        _grant_admin(user["user_id"])
-        user["role"] = "admin"
-    _record_consent(user["user_id"], req.policy_version, ip)
-    tokens = issue_tokens(user["user_id"], user["role"])
+        user = _login_console(phone)
+        _record_consent(user["user_id"], req.policy_version, ip)
+        tokens = issue_tokens(user["user_id"], user["role"])
+        return {**tokens, "user": _public_user(user)}
 
-    merged = None
-    if req.anon_token:
-        try:
-            anon_claims = decode_anon(req.anon_token)
-            merged = merge_anon_into_user(anon_claims["sub"], user["user_id"])
-        except InvalidTokenError as exc:
-            # 匿名令牌失效不影响登录本身，只放弃归并
-            log.info("匿名令牌无效，跳过归并：%s", exc)
-            merged = {"skipped": True, "errors": [str(exc)]}
-        except Exception as exc:  # noqa: BLE001 —— 归并失败绝不能让登录失败
-            log.error("匿名归并异常 user=%s：%s", user["user_id"], exc)
-            merged = {"skipped": True, "errors": [str(exc)[:200]]}
-
-    return {**tokens, "user": user, "merged": merged}
+    user = _upsert_customer(phone)
+    _record_consent(user["user_id"], req.policy_version, ip, "customer_consent")
+    tokens = issue_customer_tokens(user["user_id"])
+    merged = _merge_anon(req.anon_token, user["user_id"])
+    return {**tokens, "user": _public_user(user), "merged": merged}
 
 
 # ============================================================
@@ -402,8 +512,7 @@ def me(user: dict = Depends(get_current_user)):
 def delete_me(user: dict = Depends(get_current_user)):
     """注销：清 PII、吊销全部令牌、尽力删除历史对话与画像。
 
-    手机号明文与掩码都清空，但保留 phone_hash —— 用于防「注销后立刻重新注册刷福利」
-    类运营场景；再次登录会走 _upsert_user 的重新激活分支。
+    手机号明文与掩码都清空，但保留 phone_hash。status 变成 deleted 后，后台登录不再激活。
     """
     uid = user["user_id"]
     revoke_all_for_user(uid)

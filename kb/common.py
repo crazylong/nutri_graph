@@ -7,10 +7,12 @@ from pathlib import Path
 import config
 
 TENANT_RE = re.compile(r"^[A-Za-z0-9_]{1,32}$")
-DOC_KINDS = {"tech": "技术类", "policy": "制度类"}
+DEFAULT_TENANT = "default_renter"
+DOC_KINDS = {"tech": "技术类", "policy": "制度类", "qa": "问答类"}
 ABSTAIN = "这批制度里没有这段"
 IMAGE_WARN = 5 * 1024 * 1024
 IMAGE_MAX = 10 * 1024 * 1024
+UPLOAD_MAX = 32 * 1024 * 1024
 
 
 class KbError(Exception):
@@ -31,7 +33,7 @@ def check_tenant(value: str) -> str:
 def check_kind(value: str) -> str:
     text = (value or "").strip()
     if text not in DOC_KINDS:
-        raise KbError("分类只能是技术类或制度类", code="bad_kind")
+        raise KbError("分类只能是" + "、".join(DOC_KINDS.values()), code="bad_kind")
     return text
 
 

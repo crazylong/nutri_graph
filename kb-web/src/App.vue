@@ -1,5 +1,33 @@
 <template>
-  <main class="page">
+  <!-- 登录必须是真的 <form> + 真正的 submit 事件：浏览器（Chrome/Safari）
+       只在这种时候才会记住填过的手机号，下次双击输入框弹原生历史下拉。
+       记几条、什么时候清，全由浏览器自己决定。 -->
+  <form v-if="!access" class="gate" autocomplete="on" @submit.prevent="submitLogin">
+    <h1>企业知识库</h1>
+    <label>
+      手机号
+      <input v-model="phone" name="phone" maxlength="11" type="tel" inputmode="numeric" autocomplete="tel" />
+    </label>
+    <label v-if="captcha.svg">
+      图形码
+      <img :src="captcha.svg" alt="图形验证码" @click="loadCaptcha" />
+      <input v-model="captcha.answer" name="captcha" placeholder="图中答案" autocomplete="off" />
+    </label>
+    <label>
+      验证码
+      <input v-model="code" name="code" maxlength="6" autocomplete="one-time-code" />
+      <button type="button" class="ghost" :disabled="cooldown > 0" @click="sendCode">
+        {{ cooldown > 0 ? cooldown + 's' : '获取验证码' }}
+      </button>
+    </label>
+    <label>
+      租户
+      <input v-model="loginTenant" name="tenant" autocomplete="on" />
+    </label>
+    <button type="submit" :disabled="busy">登录</button>
+    <p v-if="error" class="error">{{ error }}</p>
+  </form>
+  <main v-else class="page" @paste="onPaste">
     <aside class="sidebar">
       <button type="button" class="ghost" @click="fresh">新对话</button>
       <h2>历史会话</h2>
@@ -28,38 +56,48 @@
     <div class="main">
     <header class="bar">
       <h1>企业知识库</h1>
-      <button type="button" class="ghost" @click="fresh">新对话</button>
+      <button type="button" class="ghost" @click="logout">退出</button>
     </header>
     <section v-if="turns.length" class="thread">
       <article v-for="(turn, index) in turns" :key="index" :class="turn.role">
         <p class="who">{{ turn.role === 'user' ? '提问' : '回答' }}</p>
-        <p v-if="turn.role === 'assistant' && turn.status && !turn.content" class="status">{{ turn.status }}</p>
-        <p class="content">{{ turn.content }}</p>
-        <div v-if="turn.hits && turn.hits.length" class="hits">
-          <div v-for="hit in turn.hits" :key="hit.chunk_id" class="hit">
-            <img v-if="hit.image_url" :src="hit.image_url" alt="" />
-            <div>
-              <div class="path">{{ hit.heading_path || '正文' }} · {{ hit.block_kind === 'image' ? '图片' : '正文' }}</div>
-              <p>{{ hit.text }}</p>
+        <div class="reply">
+          <p v-if="turn.role === 'assistant' && turn.status && !turn.content" class="status">{{ turn.status }}</p>
+          <p v-if="turn.role !== 'assistant'" class="content">{{ turn.content }}</p>
+          <div v-else-if="turn.content" class="content md" v-html="renderMarkdown(turn.content)"></div>
+          <details v-if="turn.hits && turn.hits.length" class="sources">
+            <summary>参考来源 · {{ turn.hits.length }}{{ turn.hits.some(hit => hit.block_kind === 'image') ? '，含图片' : '' }}</summary>
+            <div v-for="hit in turn.hits" :key="hit.chunk_id" class="hit">
+              <img v-if="hit.preview" :src="hit.preview" alt="" />
+              <div>
+                <div class="path">{{ hit.heading_path || '正文' }} · {{ hit.block_kind === 'image' ? '图片' : '正文' }}</div>
+                <div v-if="hit.text" class="md" v-html="renderMarkdown(hit.text)"></div>
+              </div>
             </div>
-          </div>
+          </details>
         </div>
       </article>
     </section>
     <label>
       租户
-      <select v-model="tenantId">
+      <select v-model="tenantId" @change="switchTenant">
         <option value="">请选择</option>
         <option v-for="item in tenants" :key="item" :value="item">{{ item }}</option>
       </select>
     </label>
     <label>
       问题
-      <textarea v-model="question" rows="4" placeholder="接着上一问也可以，或只上传一张图"></textarea>
+      <textarea v-model="question" rows="4" placeholder="接着上一问也可以，或粘贴、上传一张图"></textarea>
     </label>
     <label>
       图片
+      <span class="hint">选择文件，或在页面里直接粘贴（Ctrl / ⌘ + V）</span>
       <input ref="fileEl" type="file" accept="image/*" @change="onFile" />
+      <div v-if="preview" class="picked">
+        <img :src="preview" alt="待发送的图片" />
+        <span class="name">{{ file && file.name }}</span>
+        <button type="button" class="ghost" @click="clearImage">移除</button>
+      </div>
     </label>
     <button :disabled="busy" @click="ask">提问</button>
     <p v-if="error" class="error">{{ error }}</p>
@@ -68,16 +106,26 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { renderMarkdown } from './markdown.js'
 
-const CLIENT_KEY = 'ng.kb.client'
+const AT = 'ng.kb.at'
+const RT = 'ng.kb.rt'
 const SESSION_KEY = 'ng.kb.session'
+const TENANT_KEY = 'ng.kb.tenant'
 
+const access = ref(localStorage.getItem(AT) || '')
+const phone = ref('')
+const code = ref('')
+const loginTenant = ref('default_renter')
+const cooldown = ref(0)
+const captcha = ref({ id: '', svg: '', answer: '' })
 const tenants = ref([])
-const tenantId = ref('')
+const tenantId = ref(localStorage.getItem(TENANT_KEY) || '')
 const question = ref('')
 const file = ref(null)
 const fileEl = ref(null)
+const preview = ref('')
 const busy = ref(false)
 const error = ref('')
 const turns = ref([])
@@ -85,13 +133,119 @@ const sessions = ref([])
 const recent = ref([])
 const sessionId = ref(localStorage.getItem(SESSION_KEY) || '')
 
-function clientId() {
-  let value = localStorage.getItem(CLIENT_KEY) || ''
-  if (!/^[A-Za-z0-9_-]{8,64}$/.test(value)) {
-    value = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now())
-    localStorage.setItem(CLIENT_KEY, value)
+function saveTokens(body) {
+  access.value = body.access_token || ''
+  localStorage.setItem(AT, access.value)
+  if (body.refresh_token) localStorage.setItem(RT, body.refresh_token)
+}
+
+async function authFetch(url, options = {}, retried = false) {
+  const headers = new Headers(options.headers || {})
+  if (access.value) headers.set('Authorization', 'Bearer ' + access.value)
+  const response = await fetch(url, { ...options, headers })
+  if (response.status !== 401 || retried || !localStorage.getItem(RT) || String(url).startsWith('/auth/')) {
+    return response
   }
-  return value
+  const refreshed = await fetch('/auth/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: localStorage.getItem(RT) }),
+  })
+  if (!refreshed.ok) {
+    logout()
+    return response
+  }
+  saveTokens(await refreshed.json())
+  return authFetch(url, options, true)
+}
+
+async function loadCaptcha() {
+  const response = await fetch('/auth/captcha')
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok || !body.svg) {
+    error.value = '图形验证码加载失败'
+    return
+  }
+  captcha.value = {
+    id: body.challenge_id,
+    svg: 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(body.svg))),
+    answer: '',
+  }
+}
+
+async function sendCode() {
+  error.value = ''
+  const payload = { phone: phone.value.trim() }
+  if (captcha.value.id) {
+    payload.captcha_id = captcha.value.id
+    payload.captcha_answer = captcha.value.answer
+  }
+  const response = await fetch('/auth/sms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const body = await response.json().catch(() => ({}))
+  if (response.status === 428) {
+    await loadCaptcha()
+    error.value = '请先填写图形验证码'
+    return
+  }
+  if (!response.ok) {
+    error.value = (body.detail && body.detail.message) || '验证码发送失败'
+    return
+  }
+  cooldown.value = 60
+  const timer = setInterval(() => {
+    cooldown.value -= 1
+    if (cooldown.value <= 0) clearInterval(timer)
+  }, 1000)
+}
+
+async function submitLogin() {
+  error.value = ''
+  busy.value = true
+  try {
+    const response = await fetch('/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        phone: phone.value.trim(),
+        code: code.value.trim(),
+        no_create: true,
+        tenant: loginTenant.value.trim(),
+      }),
+    })
+    const body = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      error.value = (body.detail && body.detail.message) || '登录失败'
+      return
+    }
+    saveTokens(body)
+    tenantId.value = body.tenant || loginTenant.value.trim()
+    localStorage.setItem(TENANT_KEY, tenantId.value)
+    await loadTenants()
+    await loadHistory()
+  } finally {
+    busy.value = false
+  }
+}
+
+function logout() {
+  const refresh = localStorage.getItem(RT)
+  if (refresh) {
+    fetch('/auth/logout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refresh }),
+    }).catch(() => {})
+  }
+  access.value = ''
+  localStorage.removeItem(AT)
+  localStorage.removeItem(RT)
+  fresh()
+  phone.value = ''
+  code.value = ''
 }
 
 function formatWhen(value) {
@@ -105,18 +259,33 @@ function formatWhen(value) {
   return month + '/' + day + ' ' + hours + ':' + minutes
 }
 
+function tenantQuery() {
+  return 'tenant_id=' + encodeURIComponent(tenantId.value)
+}
+
+async function loadTenants() {
+  const response = await authFetch('/kb/tenants')
+  if (!response.ok) return
+  const body = await response.json()
+  tenants.value = body.tenants || []
+  if (!tenants.value.includes(tenantId.value) && tenants.value.length) {
+    tenantId.value = tenants.value[0]
+    localStorage.setItem(TENANT_KEY, tenantId.value)
+  }
+}
+
 async function loadHistory() {
-  if (!clientId()) return
+  if (!access.value || !tenantId.value) return
   const [rs, rq] = await Promise.all([
-    fetch('/kb/sessions?client_id=' + encodeURIComponent(clientId())),
-    fetch('/kb/recent?client_id=' + encodeURIComponent(clientId())),
+    authFetch('/kb/sessions?' + tenantQuery()),
+    authFetch('/kb/recent?' + tenantQuery()),
   ])
   if (rs.ok) sessions.value = (await rs.json()).sessions || []
   if (rq.ok) recent.value = (await rq.json()).questions || []
 }
 
 async function openSession(id) {
-  const r = await fetch('/kb/sessions/' + encodeURIComponent(id) + '?client_id=' + encodeURIComponent(clientId()))
+  const r = await authFetch('/kb/sessions/' + encodeURIComponent(id) + '?' + tenantQuery())
   if (!r.ok) {
     fresh()
     return
@@ -129,15 +298,21 @@ async function openSession(id) {
   loadHistory()
 }
 
+function switchTenant() {
+  localStorage.setItem(TENANT_KEY, tenantId.value)
+  sessionId.value = ''
+  turns.value = []
+  localStorage.removeItem(SESSION_KEY)
+  loadHistory()
+}
+
 onMounted(async () => {
-  const response = await fetch('/kb/tenants')
-  if (response.ok) {
-    const body = await response.json()
-    tenants.value = body.tenants || []
-    if (tenants.value.length === 1) tenantId.value = tenants.value[0]
-  }
-  if (sessionId.value) {
-    const saved = await fetch('/kb/sessions/' + sessionId.value + '?client_id=' + encodeURIComponent(clientId()))
+  // 上一版把最近登录的手机号存在本地，现在交给浏览器自带的记忆，顺手清掉
+  localStorage.removeItem('ng.kb.phones')
+  if (!access.value) return
+  await loadTenants()
+  if (sessionId.value && tenantId.value) {
+    const saved = await authFetch('/kb/sessions/' + sessionId.value + '?' + tenantQuery())
     if (!saved.ok) fresh()
     else {
       const body = await saved.json()
@@ -147,8 +322,66 @@ onMounted(async () => {
   loadHistory()
 })
 
+onBeforeUnmount(clearImage)
+
+function clearImage() {
+  file.value = null
+  if (preview.value) URL.revokeObjectURL(preview.value)
+  preview.value = ''
+  if (fileEl.value) fileEl.value.value = ''
+}
+
+function adoptImage(blob) {
+  if (!blob) return
+  const type = blob.type || 'image/png'
+  const next = blob instanceof File && blob.name
+    ? blob
+    : new File([blob], '粘贴图片.' + (type.split('/')[1] || 'png').replace('jpeg', 'jpg'), { type })
+  if (preview.value) URL.revokeObjectURL(preview.value)
+  file.value = next
+  preview.value = URL.createObjectURL(next)
+  const input = fileEl.value
+  if (input && typeof DataTransfer !== 'undefined') {
+    const bag = new DataTransfer()
+    bag.items.add(next)
+    input.files = bag.files
+  }
+}
+
 function onFile(event) {
-  file.value = event.target.files[0] || null
+  const picked = event.target.files && event.target.files[0]
+  if (!picked) {
+    clearImage()
+    return
+  }
+  adoptImage(picked)
+}
+
+function imageFromClipboard(event) {
+  const data = event.clipboardData
+  if (!data) return null
+  const files = data.files
+  if (files) {
+    for (const item of files) {
+      if (item.type && item.type.startsWith('image/')) return item
+    }
+  }
+  const items = data.items
+  if (!items) return null
+  for (const item of items) {
+    if (item.type && item.type.startsWith('image/')) {
+      const blob = item.getAsFile && item.getAsFile()
+      if (blob) return blob
+    }
+  }
+  return null
+}
+
+function onPaste(event) {
+  const blob = imageFromClipboard(event)
+  if (!blob) return
+  event.preventDefault()
+  adoptImage(blob)
 }
 
 function fresh() {
@@ -192,6 +425,23 @@ async function readSse(response, onEvent) {
   }
 }
 
+async function hydrate(hits) {
+  const out = []
+  for (const hit of hits) {
+    const copy = { ...hit }
+    if (hit.image_url) {
+      try {
+        const response = await authFetch(hit.image_url)
+        if (response.ok) copy.preview = URL.createObjectURL(await response.blob())
+      } catch {
+        /* 图片失败不影响正文 */
+      }
+    }
+    out.push(copy)
+  }
+  return out
+}
+
 async function ask() {
   if (busy.value) return
   error.value = ''
@@ -205,11 +455,9 @@ async function ask() {
   const data = new FormData()
   data.set('tenant_id', tenantId.value)
   data.set('question', spoken)
-  data.set('client_id', clientId())
   if (sessionId.value) data.set('session_id', sessionId.value)
   if (picked) data.set('image', picked)
-  file.value = null
-  if (fileEl.value) fileEl.value.value = ''
+  clearImage()
   question.value = ''
   turns.value.push({ role: 'user', content: label })
   turns.value.push({ role: 'assistant', content: '', hits: [], status: '' })
@@ -217,7 +465,7 @@ async function ask() {
   busy.value = true
   let gotSse = false
   try {
-    const response = await fetch('/kb/ask/stream', { method: 'POST', body: data })
+    const response = await authFetch('/kb/ask/stream', { method: 'POST', body: data })
     const ctype = response.headers.get('content-type') || ''
     if (!response.ok || !ctype.includes('text/event-stream')) {
       let body = null
@@ -240,7 +488,7 @@ async function ask() {
     const turn = turns.value[answerIndex]
     if (result && turn) {
       if (!turn.content && result.answer) turn.content = result.answer
-      turn.hits = result.hits || []
+      turn.hits = await hydrate(result.hits || [])
       turn.status = ''
       if (result.session_id) {
         sessionId.value = result.session_id
@@ -282,6 +530,16 @@ body {
   color: var(--ng-ink);
   -webkit-font-smoothing: antialiased;
 }
+
+.gate {
+  max-width: 420px;
+  margin: 48px auto;
+  padding: 24px;
+  background: #fff;
+  border: 1px solid var(--ng-line);
+  border-radius: 14px;
+}
+.gate input { display: block; width: 100%; margin-top: 6px; box-sizing: border-box; }
 
 .page {
   max-width: 1040px;
@@ -387,17 +645,17 @@ button.ghost:hover { border-color: var(--ng-accent); background: var(--ng-accent
   color: var(--ng-ink-3);
   font-size: 12px;
 }
+.user .reply { width: fit-content; max-width: 82%; }
 .user .content {
   background: var(--ng-accent-grad);
   color: #fff;
   padding: 11px 16px;
   border-radius: 14px 14px 4px 14px;
-  max-width: 82%;
   white-space: pre-wrap;
   box-shadow: 0 6px 16px rgba(47, 125, 93, .18);
 }
 
-.assistant { display: flex; gap: 12px; }
+.assistant { display: flex; gap: 12px; align-items: flex-start; }
 .assistant .who {
   flex: 0 0 auto;
   width: 30px; height: 30px;
@@ -410,36 +668,97 @@ button.ghost:hover { border-color: var(--ng-accent); background: var(--ng-accent
   margin: 3px 0 0;
   box-shadow: 0 3px 10px rgba(47, 125, 93, .18);
 }
+.assistant .reply { flex: 1; min-width: 0; }
 .assistant .content {
-  flex: 1;
-  min-width: 0;
   margin: 0;
-  white-space: pre-wrap;
   background: #fff;
   border: 1px solid var(--ng-line);
   border-radius: 4px 14px 14px 14px;
   padding: 14px 16px;
   box-shadow: var(--ng-shadow-sm);
 }
+.md { overflow-wrap: anywhere; line-height: 1.65; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0.55em 0; }
+.md h1, .md h2, .md h3, .md h4 { font-size: 15px; margin: 1em 0 0.35em; font-weight: 650; }
+.md ul, .md ol { margin: 0.4em 0; padding-left: 1.3em; }
+.md li { margin: 0.2em 0; }
+.md a { color: var(--ng-accent); }
+.md code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em; }
+.md :not(pre) > code { background: #eef3ee; padding: 1px 5px; border-radius: 4px; }
+.md pre {
+  margin: 0.7em 0;
+  padding: 12px 14px;
+  background: #f3f6f3;
+  border: 1px solid var(--ng-line);
+  border-radius: 8px;
+  overflow: auto;
+  line-height: 1.5;
+}
+.md pre code { background: none; padding: 0; font-size: 12.5px; }
+.md blockquote {
+  margin: 0.6em 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--ng-line);
+  color: var(--ng-ink-2);
+}
+.md table { border-collapse: collapse; margin: 0.6em 0; display: block; max-width: 100%; overflow: auto; }
+.md th, .md td { border: 1px solid var(--ng-line); padding: 4px 8px; }
 
 .who { margin: 0 0 4px; color: var(--ng-ink-3); font-size: 13px; }
 
-.hits { margin-top: 10px; }
+.sources {
+  margin-top: 8px;
+  border: 1px dashed var(--ng-line);
+  border-radius: 10px;
+}
+.sources summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  color: var(--ng-ink-3);
+  font-size: 13px;
+}
+.sources summary:hover { color: var(--ng-accent); }
 .hit {
   display: flex;
   gap: 12px;
   background: #fbfdfb;
   border: 1px solid var(--ng-line);
   border-radius: 10px;
-  padding: 12px 14px;
-  margin: 8px 0;
+  padding: 10px 12px;
+  margin: 0 12px 10px;
+  min-width: 0;
 }
 .hit img { width: 168px; height: 126px; object-fit: contain; background: #f3f5f3; border-radius: 8px; flex: none; }
-.hit p { margin: 6px 0 0; }
-.path { color: var(--ng-ink-3); font-size: 13px; }
+.hit > div { min-width: 0; flex: 1; }
+.hit .md { font-size: 13px; color: var(--ng-ink-2); }
+.path { color: var(--ng-ink-3); font-size: 13px; margin-bottom: 4px; }
 
 /* 输入区做成一张卡片 */
 label { display: block; margin: 14px 0; font-size: 14px; color: var(--ng-ink-2); }
+.hint { display: block; margin-top: 4px; font-size: 12px; color: var(--ng-ink-3); }
+.picked {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+.picked img {
+  width: 96px;
+  height: 72px;
+  object-fit: contain;
+  background: #f3f5f3;
+  border: 1px solid var(--ng-line);
+  border-radius: 8px;
+}
+.picked .name {
+  font-size: 13px;
+  color: var(--ng-ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 select, textarea, input[type="file"] {
   display: block;

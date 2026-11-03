@@ -6,15 +6,13 @@ import uuid
 import db
 from llm.usage import bind_identity, record, set_rid, span
 from security.crypto import phone_mask
-from tests.helpers import bearer, login, rand_phone
+from tests.helpers import bearer, login, login_console, rand_phone
 
 
 def test_trace_tree_and_session_summary(client, monkeypatch):
     monkeypatch.setattr("config.TRACE_ENABLED", True)
-    tokens = login(client)
+    tokens = login_console(client)
     user_id = tokens["user"]["user_id"]
-    with db.connect() as conn:
-        conn.execute("UPDATE app_user SET role = 'admin' WHERE user_id = %s", (user_id,))
     headers = bearer(tokens["access_token"])
     rid = uuid.uuid4().hex[:8]
     session_id = "sess-" + rid
@@ -54,11 +52,9 @@ def _stamp(rid: str, seconds: int) -> None:
 
 def test_recent_traces_newest_first_and_by_phone(client, monkeypatch):
     monkeypatch.setattr("config.TRACE_ENABLED", True)
-    owner = login(client)
+    owner = login_console(client)
     other = login(client)
     owner_id = owner["user"]["user_id"]
-    with db.connect() as conn:
-        conn.execute("UPDATE app_user SET role = 'admin' WHERE user_id = %s", (owner_id,))
     headers = bearer(owner["access_token"])
 
     old_rid = uuid.uuid4().hex[:8]

@@ -1,25 +1,27 @@
 <template>
   <div>
     <h2>调用追踪</h2>
-    <el-form inline @submit.prevent="loadRecent">
-      <el-form-item label="手机号">
-        <el-input v-model="phone" placeholder="用户手机号" clearable @clear="loadRecent" />
-      </el-form-item>
-      <el-button type="primary" :loading="loading" @click="loadRecent">查询</el-button>
-      <span v-if="phoneMask" class="hint">查询号码 {{ phoneMask }}</span>
-    </el-form>
-    <el-form inline @submit.prevent>
-      <el-form-item label="rid">
-        <el-input v-model="rid" placeholder="一次请求的 rid" clearable />
-      </el-form-item>
-      <el-button :loading="loading" @click="loadRid">展开这一次</el-button>
-    </el-form>
-    <el-form inline @submit.prevent>
-      <el-form-item label="session">
-        <el-input v-model="sessionId" placeholder="会话 id" clearable />
-      </el-form-item>
-      <el-button :loading="loading" @click="loadSession">列轮次</el-button>
-    </el-form>
+    <div class="filters stack">
+      <el-form inline @submit.prevent="loadRecent">
+        <el-form-item label="手机号">
+          <el-input v-model="phone" placeholder="用户手机号" clearable @clear="loadRecent" />
+        </el-form-item>
+        <el-button type="primary" :loading="loading" @click="loadRecent">查询</el-button>
+        <span v-if="phoneMask" class="hint">查询号码 {{ phoneMask }}</span>
+      </el-form>
+      <el-form inline @submit.prevent>
+        <el-form-item label="rid">
+          <el-input v-model="rid" placeholder="一次请求的 rid" clearable />
+        </el-form-item>
+        <el-button :loading="loading" @click="loadRid">展开这一次</el-button>
+      </el-form>
+      <el-form inline @submit.prevent>
+        <el-form-item label="session">
+          <el-input v-model="sessionId" placeholder="会话 id" clearable />
+        </el-form-item>
+        <el-button :loading="loading" @click="loadSession">列轮次</el-button>
+      </el-form>
+    </div>
     <p v-if="error" class="err">{{ error }}</p>
     <el-table :data="turns" v-loading="loading" size="small" style="margin-bottom: 12px">
       <el-table-column label="时间" width="180">

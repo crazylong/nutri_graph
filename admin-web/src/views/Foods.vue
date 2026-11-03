@@ -2,6 +2,8 @@
   <div>
     <div class="bar">
       <h2>食物查询</h2>
+    </div>
+    <div class="filters">
       <el-input v-model="q" placeholder="食物名、营养素，或胡萝卜 和 鸡蛋" style="width: 360px" @keyup.enter="run" />
       <el-button type="primary" @click="run">查询</el-button>
     </div>

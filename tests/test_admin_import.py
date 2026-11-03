@@ -12,24 +12,13 @@ import io
 
 import pytest
 
-from tests.helpers import bearer, login, requires_pg
+from tests.helpers import bearer, login, login_console, requires_pg
 
 pytestmark = requires_pg
 
 
-def _promote(user_id: str) -> None:
-    import psycopg
-
-    import config
-
-    with psycopg.connect(config.PG_DSN) as conn:
-        conn.execute("UPDATE app_user SET role = 'admin' WHERE user_id = %s", (user_id,))
-
-
 def _admin_headers(client) -> dict:
-    tokens = login(client)
-    _promote(tokens["user"]["user_id"])
-    return bearer(tokens["access_token"])
+    return bearer(login_console(client)["access_token"])
 
 
 def _csv_blob() -> bytes:
@@ -46,7 +35,7 @@ def test_meta_requires_admin(client):
     assert client.get("/admin/imports/meta").status_code == 401
     tokens = login(client)
     r = client.get("/admin/imports/meta", headers=bearer(tokens["access_token"]))
-    assert r.status_code == 403
+    assert r.status_code == 401
 
 
 def test_admin_meta_has_template_and_limits(client):

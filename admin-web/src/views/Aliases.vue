@@ -2,6 +2,8 @@
   <div>
     <div class="bar">
       <h2>疑似别名</h2>
+    </div>
+    <div class="filters">
       <el-select v-model="status" clearable placeholder="全部状态" style="width: 160px" @change="reload">
         <el-option v-for="item in statuses" :key="item" :label="item" :value="item" />
       </el-select>

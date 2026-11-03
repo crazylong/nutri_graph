@@ -14,7 +14,7 @@ from kg.normalize import AliasStore
 from kg.request import extract_candidates
 from kg.synonym import suggest
 from scripts.clean_request_noise import is_noise
-from tests.helpers import bearer, login, requires_pg
+from tests.helpers import bearer, login_console, requires_pg
 
 pytestmark = requires_pg
 
@@ -26,13 +26,7 @@ def _token(n: int = 6) -> str:
 
 
 def _admin(client):
-    tokens = login(client)
-    with psycopg.connect(config.PG_DSN) as conn:
-        conn.execute(
-            "UPDATE app_user SET role = 'admin' WHERE user_id = %s",
-            (tokens["user"]["user_id"],),
-        )
-    return bearer(tokens["access_token"])
+    return bearer(login_console(client)["access_token"])
 
 
 def _seed(food_key: str, hit_count: int = 1, raw: str | None = None) -> int:

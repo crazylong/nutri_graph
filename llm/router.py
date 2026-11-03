@@ -39,10 +39,21 @@ _enable_thinking: ContextVar[bool | None] = ContextVar("llm_enable_thinking", de
 # 有的端点回 400；400 在中间件里算客户端错误，不会换下一个模型。
 _THINKING_ONLY = ("2.4t-a95b", "deepseek-r1")
 
+# 温度写死的型号：kimi-k3 传 temperature=0.2 直接回
+# 400 invalid_parameter_error（只认服务端默认值）。同样的道理 —— 400 不会换模型，
+# 所以这类型号必须**完全不传** temperature（传 None，payload 会把它整条过滤掉）。
+_FIXED_TEMPERATURE = ("kimi-k3",)
+
 
 def thinking_can_be_disabled(model_name: str) -> bool:
     name = (model_name or "").lower()
     return not any(mark in name for mark in _THINKING_ONLY)
+
+
+def temperature_is_supported(model_name: str) -> bool:
+    """该型号能不能自己指定 temperature（不能的必须留空走服务端默认）。"""
+    name = (model_name or "").lower()
+    return not any(mark in name for mark in _FIXED_TEMPERATURE)
 
 
 def current_enable_thinking() -> bool | None:
@@ -117,11 +128,15 @@ def chat_model(
     而「换模型」由 wrap_call_model / with_fallbacks 负责。
 
     enable_thinking=False 关掉混合思考模型的推理（百炼扩展参数，走 extra_body）。
-    仅思考型号传了会 400，这里直接省略。
+    仅思考型号传了会 400，这里直接省略。同理，温度写死的型号（kimi-k3）
+    不传 temperature，由服务端用默认值。
     """
     from langchain_openai import ChatOpenAI
 
     t = config.LLM_TEMPERATURE if temperature is None else temperature
+    # 温度写死的型号（kimi-k3）留空：传任何值都是 400，而 400 不会触发换模型。
+    if not temperature_is_supported(spec.name):
+        t = None
     mt = config.LLM_MAX_TOKENS if max_tokens is None else max_tokens
     extras = dict(kwargs)
     # 仅思考型号省略这个参数：传 false 会 400，而 400 不会触发换模型。

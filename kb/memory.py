@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import logging
-import re
 
 import config
-from kb.common import KbError
+import db
+from kb.common import KbError, check_tenant
 from memory.short_term import ShortTermMemory
 
 log = logging.getLogger("kb.memory")
 
-_CLIENT_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _SUMMARY_PROMPT = """\
 你是企业知识库的记忆整理助手。把「已有摘要」和「新增对话」合并成一份摘要。
 
@@ -23,25 +22,27 @@ _SUMMARY_PROMPT = """\
 """
 
 
-def check_client(value: str) -> str:
-    text = (value or "").strip()
-    if not _CLIENT_RE.fullmatch(text):
-        raise KbError("会话身份无效", code="bad_client")
-    return text
+def owner(user_id: str, tenant: str) -> str:
+    """会话属主。冒号分隔，不能再走只允许字母数字的 client 正则。"""
+    return "kb:" + user_id + ":" + check_tenant(tenant)
 
 
-def user_id(client_id: str) -> str:
-    return "kb:" + check_client(client_id)
+def member(user_id: str, tenant: str) -> bool:
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM tenant_user WHERE user_id = %s AND tenant_name = %s",
+            (user_id, tenant),
+        ).fetchone()
+    return row is not None
 
 
-def open_session(client_id: str, session_id: str | None) -> str:
+def open_session(owner_id: str, session_id: str | None) -> str:
     memory = ShortTermMemory()
-    owner = user_id(client_id)
     if session_id:
-        if not memory.owns(owner, session_id):
+        if not memory.owns(owner_id, session_id):
             raise KbError("会话不存在", status=404, code="session_not_found")
         return str(session_id)
-    return memory.create_session(owner)
+    return memory.create_session(owner_id)
 
 
 def history_of(session_id: str) -> str:
@@ -57,8 +58,8 @@ def remember(session_id: str, question: str, answer: str, hits: list[dict]) -> N
     _defer_compress(session_id)
 
 
-def messages(client_id: str, session_id: str) -> list[dict]:
-    rows = ShortTermMemory().list_messages(user_id(client_id), session_id)
+def messages(owner_id: str, session_id: str) -> list[dict]:
+    rows = ShortTermMemory().list_messages(owner_id, session_id)
     if rows is None:
         raise KbError("会话不存在", status=404, code="session_not_found")
     out = []
@@ -101,11 +102,11 @@ def _defer_compress(session_id: str) -> None:
     submit_background("kb-session-compress", _run)
 
 
-def list_sessions(client_id: str) -> list[dict]:
-    """client_id 名下的会话列表，按最后活跃时间倒序。字段与主站 /sessions 一致。"""
-    return ShortTermMemory().list_sessions(user_id(client_id))
+def list_sessions(owner_id: str) -> list[dict]:
+    """这个属主名下的会话列表，按最后活跃时间倒序。"""
+    return ShortTermMemory().list_sessions(owner_id)
 
 
-def recent_questions(client_id: str, limit: int = 20) -> list[dict]:
-    """kb 侧最近问过的原话。点一下是再问一句，不是打开旧会话。"""
-    return ShortTermMemory().recent_questions(user_id(client_id), limit=limit)
+def recent_questions(owner_id: str, limit: int = 20) -> list[dict]:
+    """这个属主最近问过的原话。点一下是再问一句，不是打开旧会话。"""
+    return ShortTermMemory().recent_questions(owner_id, limit=limit)

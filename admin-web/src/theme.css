@@ -95,13 +95,34 @@ html, body {
 .el-menu {
   border-right: none;
 }
+.el-menu-item {
+  margin: 4px 10px;
+  border-radius: 8px;
+  height: 42px;
+  line-height: 42px;
+  color: var(--ng-ink-2);
+  transition: background .2s, color .2s;
+}
+.el-menu-item .el-icon {
+  font-size: 17px;
+  color: var(--ng-ink-3);
+  transition: color .2s;
+}
 .el-menu-item.is-active {
   background: var(--el-color-primary-light-9) !important;
   color: var(--ng-accent) !important;
+  font-weight: 600;
   box-shadow: inset 3px 0 0 var(--ng-accent);
+}
+.el-menu-item.is-active .el-icon {
+  color: var(--ng-accent);
 }
 .el-menu-item:hover {
   background: #f4f9f5 !important;
+  color: var(--ng-accent);
+}
+.el-menu-item:hover .el-icon {
+  color: var(--ng-accent);
 }
 
 /* 顶栏 */
@@ -112,9 +133,57 @@ html, body {
 
 /* 主内容标题 */
 .el-main h2 {
+  margin: 0 0 14px;
   font-size: 20px;
   font-weight: 650;
   letter-spacing: .2px;
+}
+
+.el-main .bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+.el-main .bar h2 { margin: 0; flex: 1; }
+
+/* 上面的筛选区和下面的列表分成两块 */
+.el-main .filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 22px;
+  padding: 14px 16px;
+  background: #fff;
+  border: 1px solid var(--ng-line);
+  border-radius: 12px;
+  box-shadow: var(--ng-shadow);
+}
+.el-main .filters.stack {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+.el-main .filters .el-form-item {
+  margin-bottom: 0;
+  margin-right: 12px;
+}
+
+.el-main .el-table {
+  border: 1px solid var(--ng-line);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: var(--ng-shadow);
+  --el-table-header-bg-color: #f4f8f5;
+  --el-table-header-text-color: #3d4f46;
+  --el-table-border-color: #e7eee9;
+}
+.el-main .el-table.el-table--border {
+  border: 1px solid var(--ng-line);
+}
+.el-main .el-pagination {
+  margin-top: 16px;
 }
 
 /* 概览数字卡片里的数值 */

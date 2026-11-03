@@ -34,10 +34,19 @@ agent = create_agent(model=primary_model(), middleware=[wrap_call_model])
 池成员只在 `.env` 里配，代码里不写死额度/到期——百炼会不定期送额度，写死必然过期：
 
 ```dotenv
-# 顺序即优先级，第一个是主模型；只收「大语言模型」，视觉/视频模型协议不兼容别放进来
-LLM_MODEL_POOL=deepseek-v4-flash-0731,qwen3.8-max,qwen3.8-2.4t-a95b,deepseek-v4-pro-0813
+# 顺序即优先级，第一个是主模型；只收「大语言模型」，视觉/视频/语音/向量模型协议不兼容别放进来
+LLM_MODEL_POOL=deepseek-v4.1-flash,qwen3.8-flash,qwen3.8-max-0902,glm-5.3,kimi-k3,qwen3.8-27b,qwen3.8-2.4t-a95b,deepseek-v4-pro-0813
 # 兜底模型：池内全部不可用时才用，填池外的模型最合适
 LLM_MODEL=deepseek-v4.1-flash-1017
+
+# 非大语言模型按控制台「模型类型」分类登记，不进轮转池（协议各不相同）
+IMAGE_MODEL_POOL=qwen-image-2.1-pro,qwen-image-2.1-turbo,qwen-mt-image-2.0
+VIDEO_MODEL_POOL=wan3.0-video,wan3.0-video-prime
+OMNI_MODEL_POOL=qwen3.8-omni-flash,qwen3.8-omni-flash-realtime,qwen-mt-uni
+TTS_MODEL_POOL=qwen-audio-3.1-tts-plus,sambert-zhide-v1,...      # Sambert 音色共 10 个
+ASR_MODEL_POOL=qwen-audio-3.1-asr-flash-streaming,paraformer-realtime-8k-v2
+EMBEDDING_MODEL_POOL=qwen3.7-text-embedding-flash               # 换模型 = 换维度，需重灌
+RERANK_MODEL_POOL=qwen3.7-text-rerank
 ```
 
 三种失败，三种处置：

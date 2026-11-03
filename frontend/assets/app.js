@@ -36,6 +36,9 @@ const K_SID = 'ng.sid';
 const K_DEV = 'ng.device';
 const K_CONSENT = 'ng.consent';   // 敏感个人信息单独同意：'1'=同意 / '0'=拒绝
 
+// 上一版把「最近登录」的手机号存在本地，现在交给浏览器自带的记忆，顺手清掉
+localStorage.removeItem('ng.phones');
+
 function deviceFp() {
   let v = localStorage.getItem(K_DEV);
   if (!v) {
@@ -84,6 +87,11 @@ async function api(path, options = {}, retried = false) {
   tokens.save(await rr.json());
   return api(path, options, true);   // 只重试一次，避免 refresh 死循环
 }
+
+/* 登录框里的「历史输入」交给浏览器自己管：
+   表单 + name 属性 + 真正的 submit 事件 → Chrome/Safari 会记住填过的号码，
+   下次双击输入框就能从下拉里挑，记几条、什么时候记由浏览器决定。
+   我们不再自己塞 localStorage —— 手机号少存一份是一份。 */
 
 /* ============================================================
    登录闸门

@@ -22,7 +22,7 @@ from graph.nodes import (
     route_after_link,
     route_node,
 )
-from llm.router import thinking_can_be_disabled
+from llm.router import temperature_is_supported, thinking_can_be_disabled
 from kg.normalize import EntityLinker, get_alias_store
 from kg.query import TEMPLATES, detect_intent, plan_queries
 
@@ -333,6 +333,13 @@ def test_thinking_only_models_skip_the_flag():
     assert thinking_can_be_disabled("deepseek-v4-flash-0731")
     assert not thinking_can_be_disabled("qwen3.8-2.4t-a95b")
     assert not thinking_can_be_disabled("deepseek-r1")
+
+
+def test_fixed_temperature_models_skip_the_param():
+    """kimi-k3 传 temperature 直接 400，而 400 不会触发换模型 —— 必须留空。"""
+    assert temperature_is_supported("qwen3.8-flash")
+    assert temperature_is_supported("deepseek-v4.1-flash")
+    assert not temperature_is_supported("kimi-k3")
 
 
 class _Store:

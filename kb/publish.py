@@ -4,8 +4,8 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from kb import caption, chunk, embed_mm, milvus, parse
-from kb.common import IMAGE_MAX, IMAGE_WARN, KbError, check_kind, check_tenant
+from kb import caption, chunk, embed_mm, memory, milvus, parse
+from kb.common import IMAGE_MAX, IMAGE_WARN, UPLOAD_MAX, KbError, check_kind, check_tenant
 from kb.store import (
     delete_chunks,
     delete_document,
@@ -31,6 +31,7 @@ _MIME = {
 
 def add_document(*, tenant_id: str, title: str, doc_kind: str, filename: str, raw: bytes, user: dict) -> dict:
     tenant = check_tenant(tenant_id)
+    _ensure_member(user, tenant)
     kind = check_kind(doc_kind)
     title = (title or "").strip()
     if not title:
@@ -52,9 +53,10 @@ def add_document(*, tenant_id: str, title: str, doc_kind: str, filename: str, ra
     return get_document(doc_id)
 
 
-def edit_document(doc_id: str, *, tenant_id: str, title: str, doc_kind: str, filename: str | None, raw: bytes | None) -> dict:
+def edit_document(doc_id: str, *, tenant_id: str, title: str, doc_kind: str, filename: str | None, raw: bytes | None, user: dict) -> dict:
     doc = _need(doc_id)
     tenant = check_tenant(tenant_id)
+    _ensure_member(user, tenant)
     kind = check_kind(doc_kind)
     title = (title or "").strip()
     if not title:
@@ -121,7 +123,7 @@ def remove(doc_id: str) -> None:
 
 def _index(doc: dict, warnings: list[str]) -> list[dict]:
     path = Path(doc["storage_path"])
-    blocks = chunk.prepare(parse.parse_file(path, doc["filename"]))
+    blocks = chunk.prepare(parse.parse_file(path, doc["filename"]), doc["doc_kind"])
     if not blocks:
         raise KbError("没有解析出可入库的内容", code="empty_doc")
     folder = path.parent / "images"
@@ -173,9 +175,16 @@ def _need(doc_id: str) -> dict:
     return doc
 
 
+def _ensure_member(user: dict, tenant: str) -> None:
+    if not memory.member(str(user.get("user_id") or ""), tenant):
+        raise KbError("不能使用这个租户", status=403, code="forbidden")
+
+
 def _check_upload(filename: str, raw: bytes) -> None:
     suffix = Path(filename or "").suffix.lower()
     if suffix not in {".md", ".markdown", ".pdf", ".docx"}:
         raise KbError("只接收 md、pdf、docx", code="bad_file")
     if not raw:
         raise KbError("文件是空的", code="empty_file")
+    if len(raw) > UPLOAD_MAX:
+        raise KbError("文件超过 32MB", code="file_too_large")

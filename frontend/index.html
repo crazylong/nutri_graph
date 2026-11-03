@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>食疗问答 · nutri_graph</title>
-<link rel="stylesheet" href="/assets/styles.css?v=20261102a">
+<link rel="stylesheet" href="/assets/styles.css?v=20261103b">
 </head>
 <body>
 
@@ -19,17 +19,19 @@
       </div>
     </div>
 
+    <!-- name 是浏览器记住历史输入的前提：有了它 + 表单真正 submit 过，
+         Chrome/Safari 才会在下次双击输入框时弹出自带的下拉历史 -->
     <label class="field">
       <span>手机号</span>
-      <input id="phone" type="tel" inputmode="numeric" maxlength="11"
-             placeholder="11 位手机号" required>
+      <input id="phone" name="phone" type="tel" inputmode="numeric" maxlength="11"
+             autocomplete="tel" placeholder="11 位手机号" required>
     </label>
 
     <label class="field">
       <span>验证码</span>
       <div class="code-row">
-        <input id="code" type="text" inputmode="numeric" maxlength="8"
-               placeholder="6 位数字" required>
+        <input id="code" name="code" type="text" inputmode="numeric" maxlength="8"
+               autocomplete="one-time-code" placeholder="6 位数字" required>
         <button type="button" class="ghost-btn" id="send-code">获取验证码</button>
       </div>
     </label>
@@ -171,6 +173,6 @@
   <p class="disclaimer">点食材节点可继续下钻；拖动节点可以拉开被压住的边。</p>
 </aside>
 
-<script src="/assets/app.js?v=20261031a"></script>
+<script src="/assets/app.js?v=20261103b"></script>
 </body>
 </html>

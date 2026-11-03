@@ -23,12 +23,18 @@ def stream_limit_seconds() -> float:
     return count * float(config.LLM_TIMEOUT) + 120
 
 
+def _open_key(stream_id: str) -> str:
+    """列表被 BLPOP 读空后 Redis 会删键。这条标记留到读完 done 才删。"""
+    return f"nutri:chat:{stream_id}:open"
+
+
 class MemoryBus:
     """测试用。接口与 RedisBus 相同，不连真 Redis。"""
 
     def __init__(self):
         self.lists: dict[str, list] = {}
         self.ttl: dict[str, int] = {}
+        self.markers: set[str] = set()
         self.cancels: set[str] = set()
         self.fail = False
 
@@ -38,15 +44,23 @@ class MemoryBus:
         key = f"nutri:chat:{stream_id}"
         self.lists.setdefault(key, []).append({"event": event, "data": data or {}})
         self.ttl[key] = TTL
+        self.markers.add(stream_id)
+        self.ttl[_open_key(stream_id)] = TTL
         return True
 
     def exists(self, stream_id: str) -> bool:
-        return f"nutri:chat:{stream_id}" in self.lists
+        return stream_id in self.markers or f"nutri:chat:{stream_id}" in self.lists
+
+    def hold(self, stream_id: str) -> None:
+        if stream_id in self.markers:
+            self.ttl[_open_key(stream_id)] = TTL
 
     def delete(self, stream_id: str) -> None:
         key = f"nutri:chat:{stream_id}"
         self.lists.pop(key, None)
         self.ttl.pop(key, None)
+        self.markers.discard(stream_id)
+        self.ttl.pop(_open_key(stream_id), None)
 
     def cancel(self, stream_id: str) -> None:
         self.cancels.add(stream_id)
@@ -103,6 +117,7 @@ class RedisBus:
             pipe = self.client.pipeline()
             pipe.rpush(key, json.dumps({"event": event, "data": data or {}}, ensure_ascii=False))
             pipe.expire(key, TTL)
+            pipe.set(_open_key(stream_id), "1", ex=TTL)
             pipe.execute()
             return True
         except Exception as exc:  # noqa: BLE001
@@ -111,13 +126,19 @@ class RedisBus:
 
     def exists(self, stream_id: str) -> bool:
         try:
-            return bool(self.client.exists(f"nutri:chat:{stream_id}"))
+            return bool(self.client.exists(f"nutri:chat:{stream_id}", _open_key(stream_id)))
         except Exception:  # noqa: BLE001
             return False
 
+    def hold(self, stream_id: str) -> None:
+        try:
+            self.client.expire(_open_key(stream_id), TTL)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Redis 续期失败：%s", exc)
+
     def delete(self, stream_id: str) -> None:
         try:
-            self.client.delete(f"nutri:chat:{stream_id}")
+            self.client.delete(f"nutri:chat:{stream_id}", _open_key(stream_id))
         except Exception as exc:  # noqa: BLE001
             log.warning("Redis DEL 失败：%s", exc)
 
@@ -180,13 +201,18 @@ def _frame(event: str, data: dict) -> str:
 
 
 async def iter_sse(bus, stream_id: str, deadline: float):
-    """读到 done 之后才删列表。超时只结束这条 SSE，不取消工作线程。"""
+    """读到 done 之后才删列表。超时只结束这条 SSE，不取消工作线程。
+
+    Redis 在 BLPOP 取走最后一条后会删掉列表键。检索或思考超过这次等待时，
+    列表是空的，但 open 标记还在，这时只发心跳，不能当成连接中断。
+    """
     seen = False
     while time.monotonic() < deadline:
         left = deadline - time.monotonic()
         item = await bus.blpop(stream_id, timeout=min(15, max(left, 0.01)))
         if item is None:
             if bus.exists(stream_id):
+                bus.hold(stream_id)
                 yield ": ping\n\n"
                 continue
             if seen:

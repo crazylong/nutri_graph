@@ -334,6 +334,78 @@ def test_list_stays_until_done_is_read(monkeypatch):
     assert any(frame.startswith("event: done") for frame in frames)
 
 
+def test_empty_redis_list_does_not_drop_the_answer():
+    """BLPOP 读走「正在查找」后列表键会消失。思考超过一次等待仍要把后到的答案送出去。"""
+    bus = MemoryBus()
+    bus.push("sid", "status", {"text": "正在查找"})
+
+    class RedisLike:
+        def push(self, stream_id, event, data=None):
+            return bus.push(stream_id, event, data)
+
+        def exists(self, stream_id):
+            return bus.exists(stream_id)
+
+        def hold(self, stream_id):
+            bus.hold(stream_id)
+
+        def delete(self, stream_id):
+            bus.delete(stream_id)
+
+        async def blpop(self, stream_id, timeout):
+            item = await bus.blpop(stream_id, timeout)
+            key = f"nutri:chat:{stream_id}"
+            if key in bus.lists and not bus.lists[key]:
+                del bus.lists[key]
+            return item
+
+    reader = RedisLike()
+
+    async def read():
+        frames = []
+        async for frame in iter_sse(reader, "sid", time.monotonic() + 1.2):
+            frames.append(frame)
+            if len(frames) == 1:
+                async def later():
+                    await asyncio.sleep(0.05)
+                    reader.push("sid", "text_delta", {"text": "包车答案"})
+                    reader.push("sid", "done", {})
+
+                asyncio.create_task(later())
+        return frames
+
+    frames = asyncio.run(read())
+    joined = "".join(frames)
+    assert "连接中断" not in joined
+    assert "包车答案" in joined
+    assert any(frame.startswith("event: done") for frame in frames)
+    assert not bus.exists("sid")
+
+
+def test_disabled_thinking_tries_a_direct_model_first(monkeypatch):
+    from llm.middleware import _Plan
+    from llm.pool import ModelSpec
+    from llm.router import override_enable_thinking
+
+    specs = [
+        ModelSpec.parse("qwen3.8-2.4t-a95b"),
+        ModelSpec.parse("deepseek-v4-pro-0813"),
+    ]
+
+    class Router:
+        def candidates(self):
+            return list(specs)
+
+    monkeypatch.setattr("llm.middleware.get_router", lambda: Router())
+    monkeypatch.setattr("llm.middleware.fallback_spec", lambda: None)
+    with override_enable_thinking(False):
+        names = [spec.name for spec in _Plan({}).order()]
+    assert names == ["deepseek-v4-pro-0813", "qwen3.8-2.4t-a95b"]
+    with override_enable_thinking(None):
+        names = [spec.name for spec in _Plan({}).order()]
+    assert names[0] == "qwen3.8-2.4t-a95b"
+
+
 def test_graph_basis_is_the_claim(monkeypatch):
     from graph.nodes import generate_node
 

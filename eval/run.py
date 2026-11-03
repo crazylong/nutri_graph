@@ -74,7 +74,9 @@ def _recording(model):
             )
         return resp
 
-    model.invoke = invoke
+    # pydantic v2 的 BaseChatModel 会拦截 __setattr__，直接赋值会报
+    # "object has no field invoke"，改用 object.__setattr__ 绕过。
+    object.__setattr__(model, "invoke", invoke)
     return model
 
 

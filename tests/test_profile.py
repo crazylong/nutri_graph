@@ -5,7 +5,7 @@ import psycopg
 
 import config
 from memory.long_term import UserProfile
-from tests.helpers import bearer, login, requires_pg
+from tests.helpers import bearer, login, login_console, requires_pg
 
 pytestmark = requires_pg
 
@@ -36,7 +36,7 @@ def test_update_skips_empty_scalars_and_unions_arrays(client):
 
 
 def test_delete_me_removes_profile_row(client):
-    tokens = login(client)
+    tokens = login_console(client)
     uid = tokens["user"]["user_id"]
     UserProfile().update(uid, age=35, symptoms=["失眠"], hobbies=["跑步"])
     r = client.delete("/auth/me", headers=bearer(tokens["access_token"]))

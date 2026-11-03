@@ -23,7 +23,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 
 import config
-from security.tokens import InvalidTokenError, decode_access, decode_anon
+from security.tokens import InvalidTokenError, decode_access, decode_anon, decode_claims
 
 import db
 
@@ -85,39 +85,75 @@ def _from_anon(token: str) -> dict:
     }
 
 
-def _resolve(token: str | None) -> dict | None:
-    if not token:
+def load_customer(user_id: str) -> dict | None:
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, phone_mask, status FROM customer WHERE user_id = %s",
+            (user_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
         return None
-    try:
-        return _from_access(token)
-    except InvalidTokenError as user_err:
-        # 不是 access token 就再试匿名身份；两种都不成立时，
-        # 报第一个错误（例如「已过期」比「类型不正确」对用户更有意义）
-        try:
-            return _from_anon(token)
-        except InvalidTokenError:
-            raise HTTPException(
-                status_code=401,
-                detail={"code": "invalid_token", "message": str(user_err)},
-                headers=_UNAUTHORIZED,
-            ) from user_err
+    return {
+        "user_id": str(row[0]),
+        "phone_mask": row[1],
+        "role": "user",
+        "status": row[2],
+    }
+
+
+def _unauthorized(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=401,
+        detail={"code": "invalid_token", "message": message},
+        headers=_UNAUTHORIZED,
+    )
 
 
 def get_principal(token: str | None = Depends(oauth2_scheme)) -> dict | None:
-    """有令牌返回身份（可能是匿名），没有返回 None。"""
-    return _resolve(token)
+    """食疗前台身份：客户令牌或匿名令牌。员工令牌不能当客户用。"""
+    if not token:
+        return None
+    try:
+        claims = decode_claims(token)
+    except InvalidTokenError as exc:
+        raise _unauthorized(str(exc)) from exc
+    typ = claims.get("typ")
+    if typ == "access":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "staff_token", "message": "请使用食疗前台账号登录"},
+        )
+    if typ == "customer":
+        user = load_customer(claims["sub"])
+        if user is None or user["status"] != "active":
+            raise _unauthorized("账号不存在或不可用")
+        return {"kind": "user", **user}
+    if typ == "anon":
+        try:
+            return _from_anon(token)
+        except InvalidTokenError as exc:
+            raise _unauthorized(str(exc)) from exc
+    raise _unauthorized("令牌类型不正确")
 
 
 def get_current_user(token: str | None = Depends(oauth2_scheme)) -> dict:
-    """必须是已登录用户；匿名身份一律拒绝（匿名不是账号，没有 phone/role）。"""
-    principal = _resolve(token)
-    if principal is None or principal["kind"] != "user":
+    """必须是员工令牌。客户令牌和匿名身份一律拒绝。"""
+    if not token:
         raise HTTPException(
             status_code=401,
             detail={"code": "unauthorized", "message": "请先登录"},
             headers=_UNAUTHORIZED,
         )
-    return principal
+    try:
+        return _from_access(token)
+    except InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "invalid_token", "message": str(exc)},
+            headers=_UNAUTHORIZED,
+        ) from exc
 
 
 def require_admin(user: dict = Depends(get_current_user)) -> dict:

@@ -1,11 +1,16 @@
 <template>
   <div class="login">
     <el-card class="card">
-      <h1>食疗管理后台</h1>
+      <h1 class="brand-row">
+        <BrandMark :size="30" :badge="false" />
+        <span>食疗管理后台</span>
+      </h1>
       <p v-if="denied" class="denied">这个账号不是管理员。请先在库里把 role 改成 admin，然后刷新本页。</p>
-      <el-form v-else @submit.prevent="submit">
+      <el-form v-else autocomplete="on" @submit.prevent="submit">
+        <!-- name 属性是浏览器记住历史输入的前提：有 name + 表单真正 submit 过，
+             下次双击输入框，Chrome/Safari 会弹出自带的下拉历史。 -->
         <el-form-item label="手机号">
-          <el-input v-model="phone" maxlength="11" placeholder="11 位手机号" />
+          <el-input v-model="phone" name="phone" type="tel" maxlength="11" placeholder="11 位手机号" autocomplete="tel" />
         </el-form-item>
         <el-form-item v-if="captcha.src" label="图形码">
           <div class="captcha">
@@ -15,7 +20,7 @@
         </el-form-item>
         <el-form-item label="验证码">
           <div class="code">
-            <el-input v-model="code" maxlength="6" />
+            <el-input v-model="code" name="code" maxlength="6" autocomplete="one-time-code" />
             <el-button :disabled="cooldown > 0" @click="sendCode">
               {{ cooldown > 0 ? cooldown + 's' : '获取验证码' }}
             </el-button>
@@ -33,6 +38,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, deviceFp, errorMessage, readJson, tokens } from '../api'
+import BrandMark from '../components/BrandMark.vue'
 
 const router = useRouter()
 const phone = ref('')
@@ -132,6 +138,8 @@ function logout() {
 }
 
 onMounted(() => {
+  // 上一版把最近登录的手机号存在本地，现在交给浏览器自带的记忆，顺手清掉
+  localStorage.removeItem('ng.admin.phones')
   if (tokens.access) enterIfAdmin()
 })
 </script>
@@ -139,9 +147,12 @@ onMounted(() => {
 <style scoped>
 .login { min-height: 100vh; display: grid; place-items: center; background: #f4f6f8; }
 .card { width: 420px; }
-h1 { margin: 0 0 16px; font-size: 20px; }
+/* 标题条本身就是品牌绿底（theme.css 里 .login .card h1 上色），
+   所以这里只把标和字排一行，别再动 margin/背景 */
+.brand-row { display: flex; align-items: center; gap: 10px; font-size: 20px; }
 .code, .captcha { display: flex; gap: 8px; width: 100%; }
 .captcha img { cursor: pointer; height: 40px; border: 1px solid #dcdfe6; border-radius: 4px; }
 .msg, .denied { color: #c45656; font-size: 13px; }
 .denied { margin-bottom: 12px; }
 </style>
+

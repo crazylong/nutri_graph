@@ -67,19 +67,38 @@ def send_code(client, phone: str, device_fp: str = "") -> str:
     return r.json().get("dev_code", "")
 
 
-def login(client, phone: str | None = None, anon_token: str = "") -> dict:
-    """完整登录，返回 /auth/token 的响应体（附带 _phone 便于断言）。"""
+def login(client, phone: str | None = None, anon_token: str = "", **extra) -> dict:
+    """食疗前台登录（不带 console）。返回 /auth/token 的响应体，附带 _phone。"""
     phone = phone or rand_phone()
     code = send_code(client, phone)
     assert code, "拿不到 dev_code：确认 DEBUG=true 且 SMS_PROVIDER=console"
-    r = client.post(
-        "/auth/token",
-        json={"phone": phone, "code": code, "anon_token": anon_token},
-    )
+    payload = {"phone": phone, "code": code, "anon_token": anon_token, **extra}
+    r = client.post("/auth/token", json=payload)
     assert r.status_code == 200, r.text
     body = r.json()
     body["_phone"] = phone
     return body
+
+
+def login_console(client, phone: str | None = None) -> dict:
+    """后台登录。新手机号成为管理员。"""
+    return login(client, phone, console=True)
+
+
+def kb_staff(client, tenant: str = "acme") -> dict:
+    """建一个管理员，并挂进指定租户。返回带 access 的登录体。"""
+    import psycopg
+
+    import config
+
+    tokens = login_console(client)
+    with psycopg.connect(config.PG_DSN) as conn:
+        conn.execute("INSERT INTO tenant (name) VALUES (%s) ON CONFLICT DO NOTHING", (tenant,))
+        conn.execute(
+            "INSERT INTO tenant_user (tenant_name, user_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (tenant, tokens["user"]["user_id"]),
+        )
+    return tokens
 
 
 def bearer(token: str) -> dict:

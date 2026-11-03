@@ -236,7 +236,7 @@ def test_frontend_drops_the_false_promise():
     assert "网络参考" in js
     assert "审核通过后就能查到" not in js
     assert "不会给出未核实的内容" not in js
-    assert "20261030a" in html
+    assert "20261031a" in html
     assert "noopener noreferrer" in js
 
 

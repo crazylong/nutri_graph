@@ -90,7 +90,7 @@ EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 KB_COLLECTION = os.getenv("KB_COLLECTION", "kb_mm_tongyi_vision_plus_1152")
 KB_EMBED_MODEL = os.getenv("KB_EMBED_MODEL", "tongyi-embedding-vision-plus-2026-03-06")
 KB_EMBED_DIM = int(os.getenv("KB_EMBED_DIM", "1152"))
-KB_CAPTION_MODEL = os.getenv("KB_CAPTION_MODEL", "qwen-vl-plus")
+KB_CAPTION_MODEL = os.getenv("KB_CAPTION_MODEL", "qwen3-vl-plus")
 KB_LAYOUT_BACKEND = os.getenv("KB_LAYOUT_BACKEND", "mock")
 # dots.mocr 私有化部署的 OpenAI 兼容基地址，形如 http://127.0.0.1:8000/v1
 KB_LAYOUT_URL = os.getenv("KB_LAYOUT_URL", "")
@@ -102,6 +102,10 @@ KB_DATA_DIR = os.getenv("KB_DATA_DIR", "data/kb")
 # 这个模型文本上限 1024 token。中文按一字一 token 估，切块留余量。
 KB_CHUNK_CHARS = int(os.getenv("KB_CHUNK_CHARS", "480"))
 KB_CHUNK_OVERLAP = int(os.getenv("KB_CHUNK_OVERLAP", "48"))
+# 语义切分开关：true 用「标题 + 语义」两级切块，false 回退到纯字符切分。
+# 语义切分按相邻句子的向量相似度找断点（对齐参考项目 SemanticChunker 的 percentile 思路），
+# 复用 embed_mm 的多模态嵌入通道，不引入 langchain-experimental。
+KB_SEMANTIC_CHUNK = os.getenv("KB_SEMANTIC_CHUNK", "true").lower() == "true"
 # 一次提问交给模型的文档块数。食疗记忆的轮数仍用 MEMORY_RETAIN_TURNS。
 KB_SEARCH_LIMIT = int(os.getenv("KB_SEARCH_LIMIT", "6"))
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
@@ -111,24 +115,43 @@ LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 LLM_MAX_TOKENS_CEILING = int(os.getenv("LLM_MAX_TOKENS_CEILING", "8192"))
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "90.0"))
 
+def _csv(key: str) -> list[str]:
+    """逗号分隔的清单（.env 里的模型名统一用它读，空项自动丢弃）。"""
+    return [m.strip() for m in os.getenv(key, "").split(",") if m.strip()]
+
+
 # ---- 大语言模型池（只收「模型类型 = 大语言模型」）----
 # 集合在 .env 里配，代码不写死任何额度 / 到期时间：
 # 百炼会不定期送额度，把「剩多少、什么时候到期」写进配置必然过期，
 # 所以这里只认「有哪些模型、谁先谁后」，额度用尽靠运行时归因（403 AllocationQuota）
 # 自动跳过，冷却到期后再自动回到候选池。
 #
-#   LLM_MODEL_POOL=deepseek-v4-flash-0731,qwen3.8-max,qwen3.8-2.4t-a95b,deepseek-v4-pro-0813
+#   LLM_MODEL_POOL=deepseek-v4.1-flash,qwen3.8-flash,qwen3.8-max-0902,glm-5.3,
+#                  kimi-k3,qwen3.8-27b,qwen3.8-2.4t-a95b,deepseek-v4-pro-0813
 #
 # 顺序 = 优先级（排第一的是主模型）。
-# 视觉/视频模型（qwen-image-*、wan*-video）协议不兼容，不要放进来。
-LLM_MODEL_POOL: list[str] = [
-    m.strip() for m in os.getenv("LLM_MODEL_POOL", "").split(",") if m.strip()
-]
+# 视觉/视频/多模态/语音/向量模型（qwen-image-*、wan*-video、sambert-*、*-rerank）
+# 协议不兼容，不要放进来 —— 它们各自记在下面的分类清单里。
+LLM_MODEL_POOL: list[str] = _csv("LLM_MODEL_POOL")
 
 
 # 兜底模型：池里模型全部不可用（额度用尽被移除 / 都在冷却）时才用它。
 # 默认取池里最后一个——它平时最后才被用到，额度通常最充裕。
 LLM_MODEL = os.getenv("LLM_MODEL", LLM_MODEL_POOL[-1] if LLM_MODEL_POOL else "")
+
+# ---- 非大语言模型：按控制台「模型类型」分类登记 ----
+# 这些**不进轮转池**：图像生成、视频生成、语音合成/识别、向量化各有各的协议
+# （图像/语音是独立 endpoint，视频还是异步任务），互相顶替只会报错。
+# 清单只回答「账号里有哪些、各归哪一类」，接入时从这里取默认值。
+IMAGE_MODEL_POOL = _csv("IMAGE_MODEL_POOL")     # 视觉模型 · 图像
+VIDEO_MODEL_POOL = _csv("VIDEO_MODEL_POOL")     # 视觉模型 · 视频
+OMNI_MODEL_POOL = _csv("OMNI_MODEL_POOL")       # 多模态模型（omni / mt-uni）
+TTS_MODEL_POOL = _csv("TTS_MODEL_POOL")         # 语音模型 · 合成
+ASR_MODEL_POOL = _csv("ASR_MODEL_POOL")         # 语音模型 · 识别
+# embedding：线上在用的那个仍是 EMBEDDING_MODEL（见上），换模型 = 换维度，
+# 必须同步 PGVECTOR_DIM / MILVUS_*_COLLECTION 并整库重灌，所以这里只做备选登记。
+EMBEDDING_MODEL_POOL = _csv("EMBEDDING_MODEL_POOL")
+RERANK_MODEL_POOL = _csv("RERANK_MODEL_POOL")   # 向量模型 · 重排
 
 # ---- 模型池行为参数 ----
 # 额度/冷却状态的持久化位置：重启后不会再去撞一个已经空了的模型

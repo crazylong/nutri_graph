@@ -35,6 +35,7 @@ from llm.router import (
     fallback_spec,
     get_router,
     in_pool,
+    thinking_can_be_disabled,
 )
 
 log = logging.getLogger("llm.middleware")
@@ -152,8 +153,18 @@ class _Plan:
         self.starved: list[str] = []
 
     def order(self):
-        """先池内，后兜底；兜底已在池内（且这轮试过）就不重复试。"""
-        for spec in self.specs:
+        """先池内，后兜底；兜底已在池内（且这轮试过）就不重复试。
+
+        调用方要求关闭思考时，能关掉的模型排在仅思考型号前面。
+        仅思考型号会先把预算花在推理上，正文要等很久，空了还要再来一轮。
+        """
+        specs = list(self.specs)
+        if current_enable_thinking() is False:
+            direct = [spec for spec in specs if thinking_can_be_disabled(spec.name)]
+            if direct and len(direct) < len(specs):
+                specs = direct + [spec for spec in specs if spec.name not in {item.name for item in direct}]
+                log.info("本次要求关闭思考，先用 %s", specs[0].name)
+        for spec in specs:
             self.tried.add(spec.name)
             yield spec
         if self.fallback and self.fallback.name not in self.tried:

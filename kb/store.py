@@ -10,7 +10,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 import db
-from kb.common import KbError, doc_dir
+from kb.common import KbError, data_root, doc_dir
 
 
 def insert_document(row: dict) -> None:
@@ -66,9 +66,7 @@ def list_documents(filters: dict) -> list[dict]:
 
 def list_tenants() -> list[str]:
     with db.connect() as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT tenant_id FROM kb_document ORDER BY 1"
-        ).fetchall()
+        rows = conn.execute("SELECT name FROM tenant ORDER BY 1").fetchall()
     return [row[0] for row in rows]
 
 
@@ -157,3 +155,15 @@ def new_id() -> str:
 def source_path(doc_id: str, filename: str) -> Path:
     folder = doc_dir(doc_id)
     return folder / ("source" + Path(filename).suffix.lower())
+
+
+def source_file(doc_id: str) -> tuple[dict, Path]:
+    """已入库原文。路径必须落在知识库数据目录里。"""
+    doc = get_document(doc_id)
+    if doc is None:
+        raise KbError("文档不存在", status=404, code="not_found")
+    path = Path(doc["storage_path"]).resolve()
+    root = data_root().resolve()
+    if not path.is_file() or (path != root and root not in path.parents):
+        raise KbError("原文不存在", status=404, code="not_found")
+    return doc, path

@@ -1,16 +1,22 @@
 <template>
   <div>
     <h2>知识库审核</h2>
-    <el-radio-group v-model="status" @change="load">
-      <el-radio-button value="pending">待审</el-radio-button>
-      <el-radio-button value="approved">已通过</el-radio-button>
-      <el-radio-button value="rejected">已驳回</el-radio-button>
-    </el-radio-group>
-    <el-table :data="items" style="width: 100%; margin-top: 12px">
+    <div class="filters">
+      <el-radio-group v-model="status" @change="load">
+        <el-radio-button value="pending">待审</el-radio-button>
+        <el-radio-button value="approved">已通过</el-radio-button>
+        <el-radio-button value="rejected">已驳回</el-radio-button>
+      </el-radio-group>
+    </div>
+    <el-table :data="items" style="width: 100%">
       <el-table-column prop="tenant_id" label="租户" width="120" />
-      <el-table-column prop="title" label="标题" />
+      <el-table-column label="标题">
+        <template #default="{ row }">
+          <button type="button" class="kb-title-link" @click="source.open(row)">{{ row.title }}</button>
+        </template>
+      </el-table-column>
       <el-table-column label="分类" width="100">
-        <template #default="{ row }">{{ row.doc_kind === 'tech' ? '技术类' : '制度类' }}</template>
+        <template #default="{ row }">{{ kindLabel(row.doc_kind) }}</template>
       </el-table-column>
       <el-table-column prop="filename" label="文件" />
       <el-table-column prop="uploader_phone_mask" label="上传人" width="140" />
@@ -22,6 +28,7 @@
         </template>
       </el-table-column>
     </el-table>
+    <KbSource ref="source" />
   </div>
 </template>
 
@@ -29,9 +36,16 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errorMessage, readJson } from '../api'
+import KbSource from '../components/KbSource.vue'
 
 const status = ref('pending')
 const items = ref([])
+const source = ref(null)
+const KIND_LABELS = { tech: '技术类', policy: '制度类', qa: '问答类' }
+
+function kindLabel(value) {
+  return KIND_LABELS[value] || value
+}
 
 async function load() {
   const response = await api('/admin/kb/review?status=' + encodeURIComponent(status.value))
