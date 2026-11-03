@@ -67,6 +67,14 @@ _MEMORY_DDL = [
 
 
 @pytest.fixture(autouse=True)
+def _kb_rerank_off(monkeypatch):
+    """精排默认开着，而且会打到收费接口。基线关掉，精排用例自己再打开。"""
+    import config
+
+    monkeypatch.setattr(config, "KB_RERANK_ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_alias_cache():
     """别名表是进程级单例。每条用例开始前丢掉，避免上一条插进 dict_alias 的行被缓存挡住。"""
     import kg.normalize as normalize

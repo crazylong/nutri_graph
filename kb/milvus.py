@@ -86,29 +86,39 @@ def insert_chunks(rows: list[dict[str, Any]]) -> None:
             "doc_id": row["doc_id"],
             "tenant_id": row["tenant_id"],
             "block_kind": row["block_kind"],
-            "text": text[:4000],
-            "heading_path": (row.get("heading_path") or "")[:500],
-            "image_path": (row.get("image_path") or "")[:500],
+            "text": _varchar(text, 4096),
+            "heading_path": _varchar(row.get("heading_path") or "", 512),
+            "image_path": _varchar(row.get("image_path") or "", 512),
             "dense": row["dense"],
         })
     client.insert(collection_name=config.KB_COLLECTION, data=payload)
 
 
+def _varchar(text: str, limit: int) -> str:
+    """字段上限按字节算。中文切 4000 个字仍可能超过 4096 字节。"""
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    return raw[:limit].decode("utf-8", errors="ignore")
+
+
 def search_text(tenant_id: str, query: str, dense: list[float], *, limit: int = 6) -> list[dict]:
     ensure_collection()
     client = _get_client()
+    # 一张图两行。多取一截，调用方去重后再截回自己要的条数。
+    fetch = _fetch(limit)
     expr = f'tenant_id == "{tenant_id}"'
     dense_req = AnnSearchRequest(
-        data=[dense], anns_field="dense", param={"metric_type": "COSINE"}, limit=20, expr=expr,
+        data=[dense], anns_field="dense", param={"metric_type": "COSINE"}, limit=fetch, expr=expr,
     )
     sparse_req = AnnSearchRequest(
-        data=[query], anns_field="sparse", param={"metric_type": "BM25"}, limit=20, expr=expr,
+        data=[query], anns_field="sparse", param={"metric_type": "BM25"}, limit=fetch, expr=expr,
     )
     res = client.hybrid_search(
         collection_name=config.KB_COLLECTION,
         reqs=[dense_req, sparse_req],
         ranker=WeightedRanker(1.0, 1.0),
-        limit=limit,
+        limit=fetch,
         output_fields=list(_FIELDS),
     )
     return _hits(res)
@@ -122,10 +132,14 @@ def search_image(tenant_id: str, dense: list[float], *, limit: int = 6) -> list[
         data=[dense],
         anns_field="dense",
         filter=f'tenant_id == "{tenant_id}"',
-        limit=limit,
+        limit=_fetch(limit),
         output_fields=list(_FIELDS),
     )
     return _hits(res)
+
+
+def _fetch(limit: int) -> int:
+    return max(int(limit) * 2, 20)
 
 
 def _hits(res) -> list[dict]:

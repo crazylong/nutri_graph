@@ -120,6 +120,78 @@ class ConsoleProvider(SmsProvider):
 # ============================================================
 # dypns —— 阿里云「短信认证」（号码认证服务）
 # ============================================================
+# 核验失败时阿里云经常直接回 4xx，SDK 当成异常抛出。
+# 能对应到用户自己能处理的原因就说明白；账号、权限、系统错误没有可执行的原因。
+VERIFY_UNAVAILABLE = "核验服务暂时不可用"
+
+_VERIFY_REASONS = {
+    "isv.ValidateFail": "验证码错误或已失效",
+    "isv.MOBILE_NUMBER_ILLEGAL": "手机号格式不正确",
+    "InvalidPhoneNumber.Check": "手机号格式不正确",
+    "isv.BUSINESS_LIMIT_CONTROL": "验证过于频繁，请稍后再试",
+    "isp.QPS_LIMIT": "验证过于频繁，请稍后再试",
+    "LimitExceeded.SmsCode": "验证码获取次数已达上限，请稍后再试",
+}
+
+# 这些是通道或账号侧的问题，原文给用户也做不了什么
+_PLATFORM_FAULT_CODES = frozenset({
+    "isp.SYSTEM_ERROR",
+    "isp.UNKNOWN",
+    "isp.RES_OWNER_ID_UNKNOWN",
+    "InternalError",
+    "SMS_SYSTEM_ERROR",
+    "ServiceUnavailable",
+    "SignatureDoesNotMatch",
+    "InvalidAccessKeyId.NotFound",
+    "InvalidAccessKeyId",
+    "Forbidden.RAM",
+    "isv.RAM_PERMISSION_DENY",
+    "isp.RAM_PERMISSION_DENY",
+    "isv.PRODUCT_UNSUBSCRIBE",
+    "isv.PRODUCT_UN_SUBSCRIPT",
+    "isv.ACCOUNT_NOT_EXISTS",
+    "isv.ACCOUNT_ABNORMAL",
+    "isv.OUT_OF_SERVICE",
+    "isv.FORBIDDEN_ACTION",
+    "isv.AMOUNT_NOT_ENOUGH",
+    "RESOURCE_NOT_ENOUGH",
+})
+
+
+def _clean_dypns_text(value) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text in {"None", "null"} else text
+
+
+def dypns_verify_reason(code: str = "", message: str = "") -> str:
+    """把阿里云核验错误译成给登录页的一句。没有可执行的原因时用兜底文案。"""
+    code = _clean_dypns_text(code)
+    message = _clean_dypns_text(message)
+    mapped = _VERIFY_REASONS.get(code)
+    if mapped:
+        return mapped
+    if message == "验证失败":
+        return "验证码错误或已失效"
+    if message and code not in _PLATFORM_FAULT_CODES and "request id" not in message.lower():
+        return message
+    return VERIFY_UNAVAILABLE
+
+
+def _reason_from_dypns_error(exc: BaseException) -> str:
+    """从 SDK 异常上取 Code / Message。异常对象自己的 message 带 request id，不能直接给用户。"""
+    code = _clean_dypns_text(getattr(exc, "code", ""))
+    message = ""
+    data = getattr(exc, "data", None)
+    if isinstance(data, dict):
+        code = code or _clean_dypns_text(data.get("Code") or data.get("code"))
+        message = _clean_dypns_text(data.get("Message") or data.get("message"))
+    if not message and "验证失败" in str(exc):
+        message = "验证失败"
+    return dypns_verify_reason(code, message)
+
+
 class DypnsProvider(SmsProvider):
     name = "dypns"
 
@@ -235,16 +307,27 @@ class DypnsProvider(SmsProvider):
             resp = client.check_sms_verify_code_with_options(req, self._runtime())
             body = getattr(resp, "body", None)
             if body is None or not getattr(body, "success", False):
-                return False, getattr(body, "message", "核验服务不可用")
+                return False, dypns_verify_reason(
+                    getattr(body, "code", ""),
+                    getattr(body, "message", ""),
+                )
             model = getattr(body, "model", None)
             result = str(getattr(model, "verify_result", "") or "").upper()
             # 平台返回 PASS / UNKNOWN / FAIL，只有 PASS 算通过
-            return (True, "") if result == "PASS" else (False, "验证码不正确或已过期")
+            return (True, "") if result == "PASS" else (False, "验证码错误或已失效")
         except SmsConfigError:
             raise
         except Exception as exc:  # noqa: BLE001
-            log.exception("短信认证核验异常")
-            return False, "核验服务暂时不可用"
+            reason = _reason_from_dypns_error(exc)
+            if reason == VERIFY_UNAVAILABLE:
+                log.exception("短信认证核验异常")
+            else:
+                log.warning(
+                    "短信认证核验未通过 code=%s reason=%s",
+                    getattr(exc, "code", ""),
+                    reason,
+                )
+            return False, reason
 
 
 # ============================================================

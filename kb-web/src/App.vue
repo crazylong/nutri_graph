@@ -3,29 +3,41 @@
        只在这种时候才会记住填过的手机号，下次双击输入框弹原生历史下拉。
        记几条、什么时候清，全由浏览器自己决定。 -->
   <form v-if="!access" class="gate" autocomplete="on" @submit.prevent="submitLogin">
-    <h1>企业知识库</h1>
-    <label>
-      手机号
-      <input v-model="phone" name="phone" maxlength="11" type="tel" inputmode="numeric" autocomplete="tel" />
-    </label>
-    <label v-if="captcha.svg">
-      图形码
-      <img :src="captcha.svg" alt="图形验证码" @click="loadCaptcha" />
-      <input v-model="captcha.answer" name="captcha" placeholder="图中答案" autocomplete="off" />
-    </label>
-    <label>
-      验证码
-      <input v-model="code" name="code" maxlength="6" autocomplete="one-time-code" />
-      <button type="button" class="ghost" :disabled="cooldown > 0" @click="sendCode">
-        {{ cooldown > 0 ? cooldown + 's' : '获取验证码' }}
-      </button>
-    </label>
-    <label>
-      租户
-      <input v-model="loginTenant" name="tenant" autocomplete="on" />
-    </label>
-    <button type="submit" :disabled="busy">登录</button>
-    <p v-if="error" class="error">{{ error }}</p>
+    <div class="gate-card">
+      <div class="gate-brand">
+        <span class="mark" aria-hidden="true">知</span>
+        <div>
+          <h1>企业知识库</h1>
+          <p>员工手机号登录</p>
+        </div>
+      </div>
+      <label class="field">
+        <span>手机号</span>
+        <input v-model="phone" name="phone" maxlength="11" type="tel" inputmode="numeric" autocomplete="tel" placeholder="11 位手机号" />
+      </label>
+      <label v-if="captcha.svg" class="field">
+        <span>图形码</span>
+        <div class="captcha-row">
+          <img :src="captcha.svg" alt="图形验证码" title="点击刷新" @click="loadCaptcha" />
+          <input v-model="captcha.answer" name="captcha" placeholder="图中答案" autocomplete="off" />
+        </div>
+      </label>
+      <label class="field">
+        <span>验证码</span>
+        <div class="code-row">
+          <input v-model="code" name="code" maxlength="6" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位数字" />
+          <button type="button" class="ghost" :disabled="cooldown > 0" @click="sendCode">
+            {{ cooldown > 0 ? cooldown + 's' : '获取验证码' }}
+          </button>
+        </div>
+      </label>
+      <label class="field">
+        <span>租户</span>
+        <input v-model="loginTenant" name="tenant" autocomplete="on" />
+      </label>
+      <p v-if="error" class="error">{{ error }}</p>
+      <button type="submit" class="submit" :disabled="busy">{{ busy ? '登录中…' : '登录' }}</button>
+    </div>
   </form>
   <main v-else class="page" @paste="onPaste">
     <aside class="sidebar">
@@ -63,8 +75,15 @@
         <p class="who">{{ turn.role === 'user' ? '提问' : '回答' }}</p>
         <div class="reply">
           <p v-if="turn.role === 'assistant' && turn.status && !turn.content" class="status">{{ turn.status }}</p>
-          <p v-if="turn.role !== 'assistant'" class="content">{{ turn.content }}</p>
-          <div v-else-if="turn.content" class="content md" v-html="renderMarkdown(turn.content)"></div>
+          <p v-if="turn.role !== 'assistant'" class="content"><img v-if="turn.image" class="sent-shot" :src="turn.image" alt=""><span v-if="turn.content">{{ turn.content }}</span></p>
+          <template v-else-if="turn.content">
+            <template v-for="(block, blockIndex) in placedAnswer(turn)" :key="blockIndex">
+              <div class="content md" v-html="block.html"></div>
+              <figure v-if="block.image" class="answer-figure">
+                <img :src="block.image" alt="" />
+              </figure>
+            </template>
+          </template>
           <details v-if="turn.hits && turn.hits.length" class="sources">
             <summary>参考来源 · {{ turn.hits.length }}{{ turn.hits.some(hit => hit.block_kind === 'image') ? '，含图片' : '' }}</summary>
             <div v-for="hit in turn.hits" :key="hit.chunk_id" class="hit">
@@ -85,20 +104,27 @@
         <option v-for="item in tenants" :key="item" :value="item">{{ item }}</option>
       </select>
     </label>
-    <label>
-      问题
-      <textarea v-model="question" rows="4" placeholder="接着上一问也可以，或粘贴、上传一张图"></textarea>
-    </label>
-    <label>
-      图片
-      <span class="hint">选择文件，或在页面里直接粘贴（Ctrl / ⌘ + V）</span>
-      <input ref="fileEl" type="file" accept="image/*" @change="onFile" />
-      <div v-if="preview" class="picked">
-        <img :src="preview" alt="待发送的图片" />
-        <span class="name">{{ file && file.name }}</span>
-        <button type="button" class="ghost" @click="clearImage">移除</button>
+    <div class="field">
+      <span class="field-name" @click="focusComposer">问题</span>
+      <div class="ask-card">
+        <div
+          ref="editorEl"
+          class="composer"
+          :class="{ empty: composerEmpty }"
+          contenteditable="true"
+          role="textbox"
+          aria-multiline="true"
+          aria-label="问题"
+          data-placeholder="接着上一问也可以，或在这里粘贴一张图"
+          @paste="onComposerPaste"
+          @input="onComposerInput"
+          @compositionstart="composing = true"
+          @compositionend="onCompositionEnd"
+        ></div>
+        <button type="button" class="ghost upload" @click="pickImage">上传图片</button>
       </div>
-    </label>
+      <input ref="fileEl" class="file-input" type="file" accept="image/*" @change="onFile" />
+    </div>
     <button :disabled="busy" @click="ask">提问</button>
     <p v-if="error" class="error">{{ error }}</p>
     </div>
@@ -107,6 +133,7 @@
 
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { placeImages } from './answer-blocks.js'
 import { renderMarkdown } from './markdown.js'
 
 const AT = 'ng.kb.at'
@@ -125,7 +152,10 @@ const tenantId = ref(localStorage.getItem(TENANT_KEY) || '')
 const question = ref('')
 const file = ref(null)
 const fileEl = ref(null)
+const editorEl = ref(null)
 const preview = ref('')
+const composerEmpty = ref(true)
+const composing = ref(false)
 const busy = ref(false)
 const error = ref('')
 const turns = ref([])
@@ -293,7 +323,7 @@ async function openSession(id) {
   const body = await r.json()
   sessionId.value = id
   localStorage.setItem(SESSION_KEY, id)
-  turns.value = body.messages || []
+  takeTurns(body.messages || [])
   error.value = ''
   loadHistory()
 }
@@ -316,45 +346,206 @@ onMounted(async () => {
     if (!saved.ok) fresh()
     else {
       const body = await saved.json()
-      turns.value = body.messages || []
+      takeTurns(body.messages || [])
     }
   }
   loadHistory()
 })
 
-onBeforeUnmount(clearImage)
+onBeforeUnmount(() => {
+  clearImage()
+  turns.value.forEach(releaseTurn)
+})
 
-function clearImage() {
+function focusComposer() {
+  if (editorEl.value) editorEl.value.focus()
+}
+
+function releaseTurn(turn) {
+  if (!turn) return
+  if (turn.image && String(turn.image).startsWith('blob:')) URL.revokeObjectURL(turn.image)
+  for (const hit of turn.hits || []) {
+    if (hit.preview && String(hit.preview).startsWith('blob:')) URL.revokeObjectURL(hit.preview)
+  }
+}
+
+function placedAnswer(turn) {
+  return placeImages(turn.content, turn.hits || []).map((block) => ({
+    html: renderMarkdown(block.text),
+    image: block.image || '',
+  }))
+}
+
+async function takeTurns(next) {
+  turns.value.forEach(releaseTurn)
+  const prepared = []
+  for (const turn of next) {
+    if (turn.role === 'assistant' && turn.hits && turn.hits.length) {
+      prepared.push({ ...turn, hits: await hydrate(turn.hits) })
+    } else if (turn.role === 'user' && turn.image_url) {
+      prepared.push({ ...turn, image: await fetchPreview(turn.image_url) })
+    } else {
+      prepared.push(turn)
+    }
+  }
+  turns.value = prepared
+}
+
+async function fetchPreview(url) {
+  try {
+    const response = await authFetch(url)
+    if (response.ok) return URL.createObjectURL(await response.blob())
+  } catch {
+    /* 原图失败仍显示提问词 */
+  }
+  return ''
+}
+
+function editorText() {
+  const editor = editorEl.value
+  if (!editor) return ''
+  let text = ''
+  const walk = (node) => {
+    node.childNodes.forEach((child) => {
+      if (child.nodeType === 3) {
+        text += child.nodeValue || ''
+        return
+      }
+      if (child.nodeType !== 1 || child.classList.contains('shot')) return
+      if (child.tagName === 'BR') {
+        text += '\n'
+        return
+      }
+      const block = child.tagName === 'DIV' || child.tagName === 'P'
+      if (block && text && !text.endsWith('\n')) text += '\n'
+      walk(child)
+    })
+  }
+  walk(editor)
+  return text.replace(/\u00a0/g, ' ').trim()
+}
+
+function syncComposer() {
+  const editor = editorEl.value
+  const hasShot = !!(editor && editor.querySelector('.shot'))
+  question.value = editorText()
+  if (!hasShot) clearImageFile()
+  composerEmpty.value = !question.value && !hasShot
+}
+
+function onComposerInput() {
+  if (composing.value) return
+  syncComposer()
+}
+
+function onCompositionEnd() {
+  composing.value = false
+  syncComposer()
+}
+
+function clearImageFile() {
   file.value = null
   if (preview.value) URL.revokeObjectURL(preview.value)
   preview.value = ''
   if (fileEl.value) fileEl.value.value = ''
 }
 
-function adoptImage(blob) {
-  if (!blob) return
+function clearImage() {
+  const editor = editorEl.value
+  if (editor) editor.querySelectorAll('.shot').forEach((node) => node.remove())
+  clearImageFile()
+  syncComposer()
+}
+
+function placeCaretAfter(node) {
+  const sel = window.getSelection()
+  if (!sel) return
+  const range = document.createRange()
+  range.setStartAfter(node)
+  range.collapse(true)
+  sel.removeAllRanges()
+  sel.addRange(range)
+}
+
+function rangeInEditor(editor) {
+  const sel = window.getSelection()
+  if (!sel || !sel.rangeCount) return null
+  const range = sel.getRangeAt(0)
+  if (!editor.contains(range.startContainer)) return null
+  const el = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement
+  if (el && el.closest && el.closest('.shot')) return null
+  return range
+}
+
+function insertText(text) {
+  const editor = editorEl.value
+  if (!editor || !text) return
+  editor.focus()
+  const range = rangeInEditor(editor)
+  if (!range) {
+    editor.appendChild(document.createTextNode(text))
+    return
+  }
+  range.deleteContents()
+  const node = document.createTextNode(text)
+  range.insertNode(node)
+  placeCaretAfter(node)
+}
+
+function insertImage(blob, atEnd) {
+  const editor = editorEl.value
+  if (!editor || !blob) return
   const type = blob.type || 'image/png'
   const next = blob instanceof File && blob.name
     ? blob
     : new File([blob], '粘贴图片.' + (type.split('/')[1] || 'png').replace('jpeg', 'jpg'), { type })
+  let range = atEnd ? null : rangeInEditor(editor)
+  editor.querySelectorAll('.shot').forEach((node) => node.remove())
+  if (range && !editor.contains(range.startContainer)) range = null
   if (preview.value) URL.revokeObjectURL(preview.value)
   file.value = next
   preview.value = URL.createObjectURL(next)
-  const input = fileEl.value
-  if (input && typeof DataTransfer !== 'undefined') {
-    const bag = new DataTransfer()
-    bag.items.add(next)
-    input.files = bag.files
+
+  const shot = document.createElement('span')
+  shot.className = 'shot'
+  shot.contentEditable = 'false'
+  const img = document.createElement('img')
+  img.src = preview.value
+  img.alt = ''
+  const remove = document.createElement('button')
+  remove.type = 'button'
+  remove.className = 'shot-x'
+  remove.setAttribute('aria-label', '移除图片')
+  remove.textContent = '×'
+  remove.addEventListener('mousedown', (event) => event.preventDefault())
+  remove.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    clearImage()
+    editor.focus()
+  })
+  shot.append(img, remove)
+
+  if (range) {
+    range.deleteContents()
+    range.insertNode(shot)
+  } else {
+    editor.appendChild(shot)
   }
+  placeCaretAfter(shot)
+  editor.focus()
+  syncComposer()
+}
+
+function pickImage() {
+  if (fileEl.value) fileEl.value.click()
 }
 
 function onFile(event) {
   const picked = event.target.files && event.target.files[0]
-  if (!picked) {
-    clearImage()
-    return
-  }
-  adoptImage(picked)
+  event.target.value = ''
+  if (!picked) return
+  insertImage(picked, true)
 }
 
 function imageFromClipboard(event) {
@@ -377,16 +568,28 @@ function imageFromClipboard(event) {
   return null
 }
 
-function onPaste(event) {
+function onComposerPaste(event) {
   const blob = imageFromClipboard(event)
   if (!blob) return
   event.preventDefault()
-  adoptImage(blob)
+  event.stopPropagation()
+  const text = event.clipboardData && event.clipboardData.getData('text/plain')
+  if (text) insertText(text)
+  insertImage(blob, false)
+}
+
+function onPaste(event) {
+  const editor = editorEl.value
+  if (editor && editor.contains(event.target)) return
+  const blob = imageFromClipboard(event)
+  if (!blob) return
+  event.preventDefault()
+  insertImage(blob, true)
 }
 
 function fresh() {
   sessionId.value = ''
-  turns.value = []
+  takeTurns([])
   localStorage.removeItem(SESSION_KEY)
   loadHistory()
 }
@@ -396,7 +599,11 @@ function askRecent(text) {
     error.value = '请先选择租户'
     return
   }
+  const editor = editorEl.value
+  clearImage()
+  if (editor) editor.textContent = text
   question.value = text
+  composerEmpty.value = !text
   ask()
 }
 
@@ -449,17 +656,22 @@ async function ask() {
     error.value = '请先选择租户'
     return
   }
+  syncComposer()
   const spoken = question.value.trim()
   const picked = file.value
-  const label = spoken || (picked && picked.name) || '（上传图片）'
+  const shot = picked ? preview.value : ''
   const data = new FormData()
   data.set('tenant_id', tenantId.value)
   data.set('question', spoken)
   if (sessionId.value) data.set('session_id', sessionId.value)
   if (picked) data.set('image', picked)
-  clearImage()
+  file.value = null
+  preview.value = ''
+  if (fileEl.value) fileEl.value.value = ''
+  if (editorEl.value) editorEl.value.innerHTML = ''
   question.value = ''
-  turns.value.push({ role: 'user', content: label })
+  composerEmpty.value = true
+  turns.value.push({ role: 'user', content: spoken, image: shot })
   turns.value.push({ role: 'assistant', content: '', hits: [], status: '' })
   const answerIndex = turns.value.length - 1
   busy.value = true
@@ -470,7 +682,8 @@ async function ask() {
     if (!response.ok || !ctype.includes('text/event-stream')) {
       let body = null
       try { body = await response.json() } catch { /* nginx 或 JSON 错误页 */ }
-      turns.value.splice(answerIndex - 1, 2)
+      const removed = turns.value.splice(answerIndex - 1, 2)
+      removed.forEach(releaseTurn)
       error.value = (body && body.detail && body.detail.message) || (body && body.error) || '提问失败'
       if (response.status === 404) fresh()
       return
@@ -532,14 +745,110 @@ body {
 }
 
 .gate {
-  max-width: 420px;
-  margin: 48px auto;
-  padding: 24px;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 28px 16px;
+  box-sizing: border-box;
+}
+.gate-card {
+  width: 100%;
+  max-width: 400px;
+  padding: 28px 26px 24px;
   background: #fff;
   border: 1px solid var(--ng-line);
-  border-radius: 14px;
+  border-radius: 16px;
+  box-shadow: var(--ng-shadow);
 }
-.gate input { display: block; width: 100%; margin-top: 6px; box-sizing: border-box; }
+.gate-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+.gate .mark {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 12px;
+  background: var(--ng-accent-grad);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(47, 125, 93, .22);
+}
+.gate-brand p {
+  margin: 3px 0 0;
+  font-size: 13px;
+  color: var(--ng-ink-3);
+}
+.gate .field { margin: 0 0 16px; }
+.gate .field > span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ng-ink-2);
+}
+.gate input {
+  display: block;
+  width: 100%;
+  height: 42px;
+  margin: 0;
+  padding: 0 12px;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 15px;
+  color: var(--ng-ink);
+  background: #fcfdfc;
+  border: 1px solid var(--ng-line);
+  border-radius: 10px;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+.gate input::placeholder { color: #b0bab3; }
+.gate input:focus {
+  border-color: var(--ng-accent);
+  box-shadow: 0 0 0 3px rgba(47, 125, 93, .12);
+}
+.gate .code-row,
+.gate .captcha-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gate .code-row input,
+.gate .captcha-row input { flex: 1; min-width: 0; }
+.gate .code-row button.ghost {
+  height: 42px;
+  margin: 0;
+  padding: 0 14px;
+  flex: none;
+  box-sizing: border-box;
+  border-radius: 10px;
+  white-space: nowrap;
+  box-shadow: none;
+}
+.gate .code-row button.ghost:hover { transform: none; }
+.gate .captcha-row img {
+  width: 118px;
+  height: 42px;
+  flex: none;
+  object-fit: contain;
+  background: #f4f7f4;
+  border: 1px solid var(--ng-line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.gate button.submit {
+  width: 100%;
+  height: 44px;
+  margin-top: 2px;
+  font-size: 15px;
+}
+.gate .error { margin: -4px 0 12px; font-size: 13px; }
 
 .page {
   max-width: 1040px;
@@ -654,6 +963,15 @@ button.ghost:hover { border-color: var(--ng-accent); background: var(--ng-accent
   white-space: pre-wrap;
   box-shadow: 0 6px 16px rgba(47, 125, 93, .18);
 }
+.user .sent-shot {
+  display: block;
+  max-width: min(240px, 100%);
+  max-height: 180px;
+  object-fit: contain;
+  background: #fff;
+  border-radius: 8px;
+}
+.user .content .sent-shot + span { display: block; margin-top: 8px; }
 
 .assistant { display: flex; gap: 12px; align-items: flex-start; }
 .assistant .who {
@@ -708,6 +1026,19 @@ button.ghost:hover { border-color: var(--ng-accent); background: var(--ng-accent
 
 .who { margin: 0 0 4px; color: var(--ng-ink-3); font-size: 13px; }
 
+.answer-figure {
+  margin: 8px 0 12px;
+}
+.answer-figure img {
+  display: block;
+  width: 100%;
+  max-height: 720px;
+  object-fit: contain;
+  background: #f7f8f7;
+  border: 1px solid var(--ng-line);
+  border-radius: 10px;
+}
+
 .sources {
   margin-top: 8px;
   border: 1px dashed var(--ng-line);
@@ -736,38 +1067,82 @@ button.ghost:hover { border-color: var(--ng-accent); background: var(--ng-accent
 .path { color: var(--ng-ink-3); font-size: 13px; margin-bottom: 4px; }
 
 /* 输入区做成一张卡片 */
-label { display: block; margin: 14px 0; font-size: 14px; color: var(--ng-ink-2); }
-.hint { display: block; margin-top: 4px; font-size: 12px; color: var(--ng-ink-3); }
-.picked {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 10px;
+label, .field { display: block; margin: 14px 0; font-size: 14px; color: var(--ng-ink-2); }
+.field-name { cursor: text; }
+.ask-card {
+  margin-top: 6px;
+  background: #fff;
+  border: 1px solid var(--ng-line);
+  border-radius: 10px;
+  transition: border-color .15s, box-shadow .15s;
 }
-.picked img {
-  width: 96px;
-  height: 72px;
+.ask-card:focus-within {
+  border-color: var(--ng-accent);
+  box-shadow: 0 0 0 3px rgba(47, 125, 93, .12);
+}
+.composer {
+  min-height: 96px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 10px 12px 4px;
+  outline: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ng-ink);
+}
+.composer.empty:before {
+  content: attr(data-placeholder);
+  color: #b0bab3;
+  pointer-events: none;
+}
+.shot {
+  display: block;
+  position: relative;
+  width: fit-content;
+  margin: 8px 0;
+  line-height: 0;
+}
+.shot img {
+  display: block;
+  max-width: min(220px, 100%);
+  max-height: 140px;
   object-fit: contain;
   background: #f3f5f3;
   border: 1px solid var(--ng-line);
   border-radius: 8px;
 }
-.picked .name {
-  font-size: 13px;
-  color: var(--ng-ink-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+button.shot-x {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(26, 36, 30, .55);
+  color: #fff;
+  box-shadow: none;
+  font-size: 14px;
+  line-height: 20px;
 }
+button.shot-x:hover {
+  transform: none;
+  background: rgba(26, 36, 30, .78);
+  box-shadow: none;
+}
+.ask-card .upload {
+  margin: 0 10px 10px;
+  box-shadow: none;
+}
+.file-input { display: none; }
 
-select, textarea, input[type="file"] {
+select {
   display: block;
   width: 100%;
   margin-top: 6px;
   font: inherit;
   color: var(--ng-ink);
-}
-textarea, select {
   border: 1px solid var(--ng-line);
   border-radius: 10px;
   padding: 10px 12px;
@@ -775,7 +1150,7 @@ textarea, select {
   outline: none;
   transition: border-color .15s, box-shadow .15s;
 }
-textarea:focus, select:focus {
+select:focus {
   border-color: var(--ng-accent);
   box-shadow: 0 0 0 3px rgba(47, 125, 93, .12);
 }
@@ -794,6 +1169,12 @@ button {
 }
 button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(47, 125, 93, .22); }
 button:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
+button.shot-x:hover,
+button.shot-x:focus {
+  transform: none;
+  background: rgba(26, 36, 30, .78);
+  box-shadow: none;
+}
 
 .error { color: #b0442f; }
 .status { margin: 0 0 6px; color: var(--ng-ink-3); font-size: 13px; }

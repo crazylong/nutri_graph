@@ -6,10 +6,12 @@
 
 用法（在服务器上，先跑 scripts.import_testdata 导入文档）：
   python -m scripts.gen_kb_samples --tenant eval --limit 20
+  python -m scripts.gen_kb_samples --tenant eval --doc-id <id> --limit 2 --append
 
 - 每个文本 chunk 调一次 LLM，生成「一个问题 + 标准答案」，问题要能用该 chunk 原文回答。
 - expected_id 用真实 chunk_id（来自 kb_chunk 表），供 Recall@K 对照。
-- --limit 限制最多生成多少条（默认 20），避免一次烧太多 token。
+- --limit 是有效题的条数，正文太短的块跳过并继续找，不是先切前 N 块再生成。
+- --doc-id 可重复。--append 只追加 kb_pairs.jsonl，不改 kb_qa.jsonl，问题重复的跳过。
 """
 from __future__ import annotations
 
@@ -51,19 +53,40 @@ _ABSTAIN_QUESTIONS = [
 ]
 
 
-def _load_chunks(tenant: str) -> list[dict]:
+def _load_chunks(tenant: str, doc_ids: list[str] | None = None) -> list[dict]:
+    # 摘要行的 block_kind 也是 text。image_path 为空才是正文，避免拿摘要出题。
+    where = "d.tenant_id = %s AND c.block_kind = 'text' AND c.image_path IS NULL"
+    args: list = [tenant]
+    if doc_ids:
+        where += " AND d.id::text = ANY(%s)"
+        args.append(doc_ids)
     with db.connect() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT c.id, c.text, c.heading_path
             FROM kb_chunk c
             JOIN kb_document d ON d.id = c.doc_id
-            WHERE d.tenant_id = %s AND c.block_kind = 'text'
+            WHERE {where}
             ORDER BY d.updated_at, c.page_no, c.id
             """,
-            (tenant,),
+            args,
         ).fetchall()
     return [{"chunk_id": r[0], "text": r[1], "heading": r[2] or ""} for r in rows]
+
+
+def merge_pairs(existing: list[dict], new_rows: list[dict]) -> tuple[list[dict], int]:
+    """按问题去重。重复的不写入，返回跳过条数。"""
+    seen = {(row.get("question") or "").strip() for row in existing}
+    skipped = 0
+    merged = list(existing)
+    for row in new_rows:
+        question = (row.get("question") or "").strip()
+        if question in seen:
+            skipped += 1
+            continue
+        seen.add(question)
+        merged.append(row)
+    return merged, skipped
 
 
 def _gen_one(chunk: dict, model) -> dict | None:
@@ -101,14 +124,33 @@ def _gen_one(chunk: dict, model) -> dict | None:
     return {"question": question, "reference": reference}
 
 
-def main() -> None:
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
+    return rows
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+    path.write_text((text + "\n") if text else "", encoding="utf-8")
+
+
+def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--tenant", default=TENANT)
-    p.add_argument("--limit", type=int, default=20, help="最多生成多少条")
-    args = p.parse_args()
+    p.add_argument("--limit", type=int, default=20, help="有效题条数，正文太短的块不计数")
+    p.add_argument("--doc-id", action="append", default=[], help="只从这些文档出题，可重复")
+    p.add_argument("--append", action="store_true", help="追加到 kb_pairs.jsonl，不改 kb_qa.jsonl")
+    args = p.parse_args(argv)
 
-    chunks = _load_chunks(args.tenant)
-    print(f"eval 租户下共 {len(chunks)} 个文本块，最多生成 {args.limit} 条")
+    chunks = _load_chunks(args.tenant, args.doc_id or None)
+    print(f"可选文本块 {len(chunks)} 个，生成 {args.limit} 条有效题")
     if not chunks:
         print("没有可用的块，请先跑 scripts.import_testdata")
         return
@@ -116,7 +158,9 @@ def main() -> None:
     qa_rows = []
     pairs_rows = []
     model = primary_model(max_tokens=1024, enable_thinking=False)
-    for chunk in chunks[: args.limit]:
+    for chunk in chunks:
+        if len(pairs_rows) >= args.limit:
+            break
         item = _gen_one(chunk, model)
         if not item:
             continue
@@ -129,22 +173,24 @@ def main() -> None:
             "question": item["question"],
             "expected_id": chunk["chunk_id"],
         })
-        print(f"  [{len(qa_rows)}] {item['question'][:40]}")
+        print(f"  [{len(pairs_rows)}] {item['question'][:40]}")
+
+    if args.append:
+        merged, skipped = merge_pairs(_read_jsonl(OUT_PAIRS), pairs_rows)
+        _write_jsonl(OUT_PAIRS, merged)
+        if skipped:
+            print(f"跳过重复问题 {skipped} 条")
+        print(f"\n追加完成：kb_pairs.jsonl {len(merged)} 条（本次新题 {len(pairs_rows) - skipped}）")
+        print(f"  {OUT_PAIRS}")
+        return
 
     # 追加弃答题（reference=ABSTAIN），验证系统是否诚实拒答。不进 pairs（无 expected_id）。
     for q in _ABSTAIN_QUESTIONS:
         qa_rows.append({"question": q, "reference": "ABSTAIN", "tenant_id": args.tenant})
         print(f"  [弃答] {q}")
 
-    OUT_QA.parent.mkdir(parents=True, exist_ok=True)
-    OUT_QA.write_text(
-        "\n".join(json.dumps(r, ensure_ascii=False) for r in qa_rows) + "\n",
-        encoding="utf-8",
-    )
-    OUT_PAIRS.write_text(
-        "\n".join(json.dumps(r, ensure_ascii=False) for r in pairs_rows) + "\n",
-        encoding="utf-8",
-    )
+    _write_jsonl(OUT_QA, qa_rows)
+    _write_jsonl(OUT_PAIRS, pairs_rows)
     print(f"\n生成完成：kb_qa.jsonl {len(qa_rows)} 条，kb_pairs.jsonl {len(pairs_rows)} 条")
     print(f"  {OUT_QA}")
     print(f"  {OUT_PAIRS}")

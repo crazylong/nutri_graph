@@ -96,8 +96,27 @@ def _recall(pairs: list[dict]) -> dict:
         expected = row["expected_id"]
         hits = search_question(_tenant(expected), row["question"], limit=10)
         rank = next((i for i, hit in enumerate(hits, 1) if hit["chunk_id"] == expected), None)
+        if rank is None:
+            # 重嵌后题还指着旧 id 时，同一张图的另一行也算命中。租户查询保持原样。
+            path = _image_path(expected)
+            if path:
+                rank = next(
+                    (i for i, hit in enumerate(hits, 1) if (hit.get("image_path") or "") == path),
+                    None,
+                )
         ranks.append(rank)
     return score_ranks(ranks)
+
+
+def _image_path(chunk_id: str) -> str:
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT image_path FROM kb_chunk WHERE id = %s",
+            (chunk_id,),
+        ).fetchone()
+    if row is None or not row[0]:
+        return ""
+    return row[0]
 
 
 def _ragas(rows: list[dict]) -> dict:

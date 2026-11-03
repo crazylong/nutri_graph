@@ -34,6 +34,9 @@ _QA_START = re.compile(r"(?m)^[ \t]*(?:问题|问|Q|q)[ \t]*\d*[ \t]*[:：.、)�
 # 取值偏保守（宁可多连一点，也不把语义完整的一段切碎）。
 _SIM_BREAK = 0.55
 
+# 图片描述只用切块之后、左右各最近的一条正文，每边最多这么多字。
+_CONTEXT_CHARS = 500
+
 
 def prepare(blocks: list[dict], doc_kind: str = "") -> list[dict]:
     """入口：保持原签名与输出字段不变；doc_kind 只影响切分策略。"""
@@ -72,7 +75,35 @@ def prepare(blocks: list[dict], doc_kind: str = "") -> list[dict]:
             piece = piece.strip()
             if piece:
                 out.append({**block, "text": piece, "heading_path": heading, "image_bytes": None})
-    return out
+    return _attach_context(out)
+
+
+def _attach_context(blocks: list[dict]) -> list[dict]:
+    """给图片补上左右正文。邻居按 block_kind 认，不看 image_path（这时路径还是空的）。
+
+    PDF 里没有坐标的图无法判断插在哪两段之间，上下文留空，描述只用章节。
+    Markdown / Word 的 page_no 是空的，仍然取左右正文。
+    """
+    for index, block in enumerate(blocks):
+        if block.get("block_kind") != "image":
+            continue
+        if block.get("page_no") is not None and not block.get("bbox"):
+            block["prev_text"] = ""
+            block["next_text"] = ""
+            continue
+        block["prev_text"] = _neighbor_text(blocks, index, -1)
+        block["next_text"] = _neighbor_text(blocks, index, 1)
+    return blocks
+
+
+def _neighbor_text(blocks: list[dict], index: int, step: int) -> str:
+    cursor = index + step
+    while 0 <= cursor < len(blocks):
+        block = blocks[cursor]
+        if block.get("block_kind") == "text":
+            return (block.get("text") or "")[:_CONTEXT_CHARS]
+        cursor += step
+    return ""
 
 
 def _split_qa(body: str, heading: str, splitter: RecursiveCharacterTextSplitter) -> list[str]:

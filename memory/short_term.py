@@ -207,6 +207,7 @@ class ShortTermMemory:
         question: str,
         answer: str,
         card: dict | None = None,
+        user_meta: dict | None = None,
     ) -> None:
         title = " ".join((question or "").split())[:SESSION_TITLE_CHARS]
         with db.connect() as conn:
@@ -223,11 +224,18 @@ class ShortTermMemory:
             )
             turn_no = int(cur.fetchone()[0]) + 1
 
-            cur.execute(
-                "INSERT INTO message (session_id, role, content, turn_no, kind) "
-                "VALUES (%s, 'user', %s, %s, 'human')",
-                (session_id, question, turn_no),
-            )
+            if user_meta:
+                cur.execute(
+                    "INSERT INTO message (session_id, role, content, meta, turn_no, kind) "
+                    "VALUES (%s, 'user', %s, %s, %s, 'human')",
+                    (session_id, question, Jsonb(_json_card(user_meta)), turn_no),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO message (session_id, role, content, turn_no, kind) "
+                    "VALUES (%s, 'user', %s, %s, 'human')",
+                    (session_id, question, turn_no),
+                )
             cur.execute(
                 "INSERT INTO message (session_id, role, content, meta, turn_no, kind) "
                 "VALUES (%s, 'assistant', %s, %s, %s, 'ai')",
@@ -311,6 +319,8 @@ class ShortTermMemory:
             meta = row[4] or {}
             if row[1] == "assistant" and isinstance(meta, dict):
                 item.update(meta)
+            elif isinstance(meta, dict) and meta:
+                item["meta"] = meta
             messages.append(item)
         return messages
 

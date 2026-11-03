@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import logging
+import re
+import uuid
+from pathlib import Path
 
 import config
 import db
-from kb.common import KbError, check_tenant
+from kb.common import KbError, check_tenant, data_root
 from memory.short_term import ShortTermMemory
 
 log = logging.getLogger("kb.memory")
@@ -51,14 +54,64 @@ def history_of(session_id: str) -> str:
     return ShortTermMemory().load_context(session_id)
 
 
-def remember(session_id: str, question: str, answer: str, hits: list[dict]) -> None:
+_IMAGE_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+_IMAGE_NAME = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|jpeg|webp|gif)\Z")
+
+
+def remember(
+    session_id: str,
+    question: str,
+    answer: str,
+    hits: list[dict],
+    image: bytes | None = None,
+    mime: str = "",
+) -> None:
     if not config.MEMORY_ENABLED:
         return
-    ShortTermMemory().save_round(session_id, question, answer, {"hits": hits})
+    stored = ""
+    if image:
+        try:
+            stored = save_ask_image(session_id, image, mime)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("提问原图没写入：%s", exc)
+    user_meta = {"image": stored} if stored else None
+    ShortTermMemory().save_round(session_id, question, answer, {"hits": hits}, user_meta=user_meta)
+    if stored and not (question or "").strip():
+        _title_uploaded(session_id)
     _defer_compress(session_id)
 
 
-def messages(owner_id: str, session_id: str) -> list[dict]:
+def save_ask_image(session_id: str, raw: bytes, mime: str) -> str:
+    sid = str(uuid.UUID(str(session_id)))
+    ext = _IMAGE_EXT.get((mime or "").split(";")[0].strip().lower(), ".png")
+    name = uuid.uuid4().hex + ext
+    folder = data_root() / "ask" / sid
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_bytes(raw)
+    return name
+
+
+def ask_image_path(session_id: str, name: str) -> Path | None:
+    if not _IMAGE_NAME.fullmatch(name or ""):
+        return None
+    try:
+        sid = str(uuid.UUID(str(session_id)))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    root = (data_root() / "ask" / sid).resolve()
+    path = (root / name).resolve()
+    if path.parent != root or not path.is_file():
+        return None
+    return path
+
+
+def messages(owner_id: str, session_id: str, *, tenant: str) -> list[dict]:
     rows = ShortTermMemory().list_messages(owner_id, session_id)
     if rows is None:
         raise KbError("会话不存在", status=404, code="session_not_found")
@@ -67,8 +120,26 @@ def messages(owner_id: str, session_id: str) -> list[dict]:
         item = {"role": row["role"], "content": row["content"]}
         if row["role"] == "assistant":
             item["hits"] = row.get("hits") or []
+        elif row["role"] == "user":
+            name = (row.get("meta") or {}).get("image") or ""
+            if isinstance(name, str) and _IMAGE_NAME.fullmatch(name):
+                item["image_url"] = f"/kb/ask-images/{session_id}/{name}?tenant_id={tenant}"
         out.append(item)
     return out
+
+
+def recent_questions(owner_id: str, limit: int = 20) -> list[dict]:
+    """这个属主最近问过的原话。点一下是再问一句，不是打开旧会话。"""
+    rows = ShortTermMemory().recent_questions(owner_id, limit=limit)
+    return [row for row in rows if (row.get("question") or "").strip()]
+
+
+def _title_uploaded(session_id: str) -> None:
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE session SET title = %s WHERE id = %s AND COALESCE(title, '') = ''",
+            ("（上传图片）", session_id),
+        )
 
 
 def _kb_summarize(prev: str, inc: str) -> str:
@@ -105,8 +176,3 @@ def _defer_compress(session_id: str) -> None:
 def list_sessions(owner_id: str) -> list[dict]:
     """这个属主名下的会话列表，按最后活跃时间倒序。"""
     return ShortTermMemory().list_sessions(owner_id)
-
-
-def recent_questions(owner_id: str, limit: int = 20) -> list[dict]:
-    """这个属主最近问过的原话。点一下是再问一句，不是打开旧会话。"""
-    return ShortTermMemory().recent_questions(owner_id, limit=limit)

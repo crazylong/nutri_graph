@@ -1,16 +1,20 @@
 """知识库问答的短链路。食疗图不进这里。"""
 from __future__ import annotations
 
+import logging
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
 import config
+from kb import rerank
 from kb.common import ABSTAIN, format_hit
 from kb.search import search_picture, search_question
 from llm import invoke_model, stream_model
 from llm.streamctx import hook
 from llm.usage import purpose, span
+
+log = logging.getLogger("kb.workflow")
 
 
 class AskState(TypedDict, total=False):
@@ -71,12 +75,37 @@ def _retrieve(state: dict) -> dict:
                 limit=config.KB_SEARCH_LIMIT,
             )
         else:
-            hits = search_question(
-                state["tenant_id"], state.get("question") or "",
-                limit=config.KB_SEARCH_LIMIT,
-            )
+            question = state.get("question") or ""
+            if _rerank_on():
+                hits = search_question(
+                    state["tenant_id"], question, limit=config.KB_RERANK_CANDIDATES,
+                )
+                hits = _rerank(question, hits)
+            else:
+                hits = search_question(
+                    state["tenant_id"], question, limit=config.KB_SEARCH_LIMIT,
+                )
         box.output = ",".join(hit["chunk_id"] for hit in hits)
     return {"hits": hits}
+
+
+def _rerank_on() -> bool:
+    return bool(
+        config.KB_RERANK_ENABLED
+        and config.DASHSCOPE_API_KEY
+        and config.RERANK_MODEL_POOL
+    )
+
+
+def _rerank(question: str, hits: list[dict]) -> list[dict]:
+    with span("node", "kb_rerank", input=question) as box:
+        try:
+            ranked = rerank.rerank(question, hits)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("精排异常，退回混合检索顺序：%s", exc)
+            ranked = hits[: config.KB_SEARCH_LIMIT]
+        box.output = ",".join(f"{hit['chunk_id']}:{hit.get('score')}" for hit in ranked)
+    return ranked
 
 
 def _images(state: dict) -> dict:

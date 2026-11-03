@@ -17,6 +17,7 @@ from kb import memory
 from kb.common import TENANT_RE, KbError
 from kb.store import get_chunk
 from kb.workflow import run_ask
+from memory.short_term import ShortTermMemory
 
 router = APIRouter(tags=["kb"])
 log = logging.getLogger("api.kb")
@@ -87,9 +88,9 @@ async def ask(
     except KbError as exc:
         return _fail(exc)
     if sid:
-        spoken = text or name or "（上传图片）"
+        spoken = text
         try:
-            memory.remember(sid, spoken, result["answer"], result["hits"])
+            memory.remember(sid, spoken, result["answer"], result["hits"], image=raw or None, mime=mime)
         except Exception:
             pass
         result["session_id"] = sid
@@ -123,7 +124,7 @@ def _prepare_ask(user: dict, tenant_id: str, question: str, session_id: str, raw
     if not text and not raw:
         raise HTTPException(status_code=400, detail={"code": "empty_question", "message": "请输入问题或上传一张图"})
     sid, history = _session(memory.owner(user["user_id"], tenant), session_id)
-    spoken = text or name or "（上传图片）"
+    spoken = text
     return (tenant, text, sid, history, spoken), None
 
 
@@ -177,7 +178,10 @@ def _run_kb_stream(
                     streamer.text_delta(result.get("answer") or "")
                 if sid and not streamer.cancelled():
                     try:
-                        memory.remember(sid, spoken, result["answer"], result["hits"])
+                        memory.remember(
+                            sid, spoken, result["answer"], result["hits"],
+                            image=raw or None, mime=mime,
+                        )
                     except Exception:
                         pass
                 payload = {
@@ -269,7 +273,7 @@ async def ask_stream(
 def session_messages(session_id: str, tenant_id: str = "", user: dict = Depends(get_current_user)):
     tenant = _tenant_for(user, tenant_id)
     try:
-        return {"messages": memory.messages(memory.owner(user["user_id"], tenant), session_id)}
+        return {"messages": memory.messages(memory.owner(user["user_id"], tenant), session_id, tenant=tenant)}
     except KbError as exc:
         return _fail(exc)
 
@@ -277,6 +281,17 @@ def session_messages(session_id: str, tenant_id: str = "", user: dict = Depends(
 def _session(owner_id: str, session_id: str) -> tuple[str, str]:
     sid = memory.open_session(owner_id, session_id or None)
     return sid, memory.history_of(sid)
+
+
+@router.get("/kb/ask-images/{session_id}/{name}")
+def ask_image(session_id: str, name: str, tenant_id: str = "", user: dict = Depends(get_current_user)):
+    tenant = _tenant_for(user, tenant_id)
+    if not ShortTermMemory().owns(memory.owner(user["user_id"], tenant), session_id):
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "图片不存在"})
+    path = memory.ask_image_path(session_id, name)
+    if path is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "图片不存在"})
+    return FileResponse(path)
 
 
 @router.get("/kb/images/{chunk_id}")
