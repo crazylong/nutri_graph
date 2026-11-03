@@ -108,13 +108,17 @@ KB_CHUNK_OVERLAP = int(os.getenv("KB_CHUNK_OVERLAP", "48"))
 KB_SEMANTIC_CHUNK = os.getenv("KB_SEMANTIC_CHUNK", "true").lower() == "true"
 # 一次提问交给模型的文档块数。食疗记忆的轮数仍用 MEMORY_RETAIN_TURNS。
 KB_SEARCH_LIMIT = int(os.getenv("KB_SEARCH_LIMIT", "6"))
-# 文本提问先多召回再精排。精排地址是 DashScope 原生 text-rerank，不是 compatible-mode。
+# 文本提问的召回条数。精排关掉时也按它取，实际取值不小于 KB_SEARCH_LIMIT。
+# 精排地址是 DashScope 原生 text-rerank，不是 compatible-mode。
 KB_RERANK_ENABLED = os.getenv("KB_RERANK_ENABLED", "true").lower() == "true"
 KB_RERANK_CANDIDATES = int(os.getenv("KB_RERANK_CANDIDATES", "20"))
 RERANK_BASE_URL = os.getenv(
     "RERANK_BASE_URL",
     "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
 )
+# 近义正文收成一条。关掉则排序后直接取前 KB_SEARCH_LIMIT 条。
+KB_DIVERSIFY_ENABLED = os.getenv("KB_DIVERSIFY_ENABLED", "true").lower() == "true"
+KB_DIVERSIFY_THRESHOLD = float(os.getenv("KB_DIVERSIFY_THRESHOLD", "0.72"))
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 # 推理模型（deepseek / qwen-thinking）会把 completion 预算先花在 reasoning 上，

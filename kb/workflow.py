@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 
 import config
 from kb import rerank
+from kb import diversify
 from kb.common import ABSTAIN, format_hit
 from kb.search import search_picture, search_question
 from llm import invoke_model, stream_model
@@ -76,17 +77,18 @@ def _retrieve(state: dict) -> dict:
             )
         else:
             question = state.get("question") or ""
+            hits = search_question(
+                state["tenant_id"], question, limit=_pool_limit(),
+            )
             if _rerank_on():
-                hits = search_question(
-                    state["tenant_id"], question, limit=config.KB_RERANK_CANDIDATES,
-                )
                 hits = _rerank(question, hits)
-            else:
-                hits = search_question(
-                    state["tenant_id"], question, limit=config.KB_SEARCH_LIMIT,
-                )
+            hits = _diversify(hits)
         box.output = ",".join(hit["chunk_id"] for hit in hits)
     return {"hits": hits}
+
+
+def _pool_limit() -> int:
+    return max(int(config.KB_RERANK_CANDIDATES), int(config.KB_SEARCH_LIMIT))
 
 
 def _rerank_on() -> bool:
@@ -103,9 +105,28 @@ def _rerank(question: str, hits: list[dict]) -> list[dict]:
             ranked = rerank.rerank(question, hits)
         except Exception as exc:  # noqa: BLE001
             log.warning("精排异常，退回混合检索顺序：%s", exc)
-            ranked = hits[: config.KB_SEARCH_LIMIT]
+            ranked = hits
         box.output = ",".join(f"{hit['chunk_id']}:{hit.get('score')}" for hit in ranked)
     return ranked
+
+
+def _diversify(hits: list[dict]) -> list[dict]:
+    limit = config.KB_SEARCH_LIMIT
+    if not config.KB_DIVERSIFY_ENABLED:
+        return list(hits[:limit])
+    label = ",".join(str(hit.get("chunk_id") or "") for hit in hits if isinstance(hit, dict))
+    with span("node", "kb_diversify", input=label) as box:
+        try:
+            kept = diversify.diversify(
+                hits,
+                limit=limit,
+                threshold=config.KB_DIVERSIFY_THRESHOLD,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("收敛异常，退回排序后的前 N 条：%s", exc)
+            kept = list(hits[:limit])
+        box.output = ",".join(str(hit.get("chunk_id") or "") for hit in kept if isinstance(hit, dict))
+    return kept
 
 
 def _images(state: dict) -> dict:

@@ -49,19 +49,35 @@ def test_search_limit_follows_config(client, monkeypatch):
 
     monkeypatch.setattr(config, "KB_SEARCH_LIMIT", 2)
     seen = {}
+    rows = []
+    for i in range(10):
+        base = 0x4e00 + i * 20
+        rows.append({
+            "chunk_id": str(i),
+            "block_kind": "text",
+            "text": "".join(chr(base + k) for k in range(12)),
+            "heading_path": "",
+            "image_path": "",
+            "score": 1,
+        })
 
     def spy(tenant_id, question, limit=None):
         seen["limit"] = limit
-        return []
+        return rows
+
+    class _Msg:
+        content = "按票据实报。"
 
     monkeypatch.setattr("kb.workflow.search_question", spy)
+    monkeypatch.setattr("kb.workflow.invoke_model", lambda *args, **kwargs: _Msg())
     response = client.post(
         "/kb/ask",
         data={"tenant_id": "nobody", "question": "差旅费怎么报"},
         headers=_who(client, "nobody"),
     )
     assert response.status_code == 200, response.text
-    assert seen["limit"] == 2
+    assert seen["limit"] == max(config.KB_RERANK_CANDIDATES, 2)
+    assert [hit["chunk_id"] for hit in response.json()["hits"]] == ["0", "1"]
 
 
 def test_later_turn_keeps_recent_dialogue_and_image(client, monkeypatch):

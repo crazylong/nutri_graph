@@ -47,10 +47,13 @@ TTS_MODEL_POOL=qwen-audio-3.1-tts-plus,sambert-zhide-v1,...      # Sambert 音�
 ASR_MODEL_POOL=qwen-audio-3.1-asr-flash-streaming,paraformer-realtime-8k-v2
 EMBEDDING_MODEL_POOL=qwen3.7-text-embedding-flash               # 换模型 = 换维度，需重灌
 RERANK_MODEL_POOL=qwen3.7-text-rerank
-# 企业知识库文本提问精排（原生 text-rerank，不是 compatible-mode 的 /rerank）
+# 企业知识库文本提问：先按 KB_RERANK_CANDIDATES 召回（精排关掉也按它取），再精排。
+# 地址是原生 text-rerank，不是 compatible-mode 的 /rerank。近义正文再收成一条。
 KB_RERANK_ENABLED=true
 KB_RERANK_CANDIDATES=20
 RERANK_BASE_URL=https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank
+KB_DIVERSIFY_ENABLED=true
+KB_DIVERSIFY_THRESHOLD=0.72
 ```
 
 三种失败，三种处置：

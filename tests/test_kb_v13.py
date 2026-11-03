@@ -298,22 +298,50 @@ def test_rerank_reorders_and_failures_cut(monkeypatch):
 
     monkeypatch.setattr(rerank.httpx, "post", post)
     ordered = rerank.rerank("差旅费", hits)
-    assert [hit["chunk_id"] for hit in ordered] == ["3", "1"]
+    assert [hit["chunk_id"] for hit in ordered] == ["3", "1", "0", "2", "4", "5", "6", "7"]
     assert ordered[0]["score"] == 0.8
+    assert ordered[2]["score"] == hits[0]["score"]
     assert captured["url"] == "https://example.test/rerank"
     assert len(captured["body"]["input"]["documents"][0]) == 500
-    assert captured["body"]["parameters"]["top_n"] == 2
+    assert captured["body"]["parameters"]["top_n"] == 8
+
+    class _Full:
+        status_code = 200
+
+        def json(self):
+            return {
+                "output": {"results": [
+                    {"index": i, "relevance_score": 1 - i / 10} for i in range(7, -1, -1)
+                ]},
+                "usage": {},
+            }
+
+    monkeypatch.setattr(rerank.httpx, "post", lambda url, **kwargs: _Full())
+    full = rerank.rerank("差旅费", hits)
+    assert [hit["chunk_id"] for hit in full] == [str(i) for i in range(7, -1, -1)]
 
     def boom(*args, **kwargs):
         raise httpx.TimeoutException("slow")
 
     monkeypatch.setattr(rerank.httpx, "post", boom)
     fallback = rerank.rerank("差旅费", hits)
-    assert [hit["chunk_id"] for hit in fallback] == ["0", "1"]
+    assert [hit["chunk_id"] for hit in fallback] == [str(i) for i in range(8)]
+
+    distinct = []
+    for i in range(8):
+        base = 0x5000 + i * 20
+        distinct.append({
+            "chunk_id": str(i),
+            "text": "".join(chr(base + k) for k in range(12)),
+            "score": 1,
+            "block_kind": "text",
+            "heading_path": "",
+            "image_path": "",
+        })
 
     def search(tenant_id, question, limit=None):
         captured["limit"] = limit
-        return hits
+        return distinct
 
     monkeypatch.setattr("kb.workflow.search_question", search)
 
@@ -335,7 +363,7 @@ def test_rerank_reorders_and_failures_cut(monkeypatch):
     monkeypatch.setattr(rerank.httpx, "post", refuse)
     monkeypatch.setattr(rerank, "rerank", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("未调用")))
     _retrieve({"tenant_id": "eval", "question": "差旅费"})
-    assert captured["limit"] == 2
+    assert captured["limit"] == 8
     assert called["n"] == 0
 
 
