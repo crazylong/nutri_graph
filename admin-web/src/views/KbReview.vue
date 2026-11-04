@@ -58,16 +58,38 @@ async function load() {
 }
 
 async function approve(row) {
+  try {
+    await ElMessageBox.confirm(`确定通过「${row.title}」吗？`, '审核确认', {
+      confirmButtonText: '确定通过',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch {
+    return
+  }
   const response = await api('/admin/kb/docs/' + row.id + '/approve', { method: 'POST' })
   const body = await readJson(response)
   if (!response.ok) {
-    ElMessage.error(errorMessage(body, '通过失败，文档仍是待审'))
+    ElMessage.error(errorMessage(body, '通过失败'))
+    return
   }
+  ElMessage.success('已通过')
   await load()
 }
 
 async function reject(row) {
-  const { value } = await ElMessageBox.prompt('驳回原因（可空）', '驳回', { inputValue: '' })
+  let value
+  try {
+    const result = await ElMessageBox.prompt('确定驳回该文档吗？请填写驳回原因（可空）：', '驳回确认', {
+      inputValue: '',
+      confirmButtonText: '确定驳回',
+      cancelButtonText: '取消',
+      inputPlaceholder: '驳回原因（可空）',
+    })
+    value = result.value
+  } catch {
+    return
+  }
   const data = new FormData()
   data.set('reason', value || '')
   const response = await api('/admin/kb/docs/' + row.id + '/reject', { method: 'POST', body: data })
@@ -76,6 +98,7 @@ async function reject(row) {
     ElMessage.error(errorMessage(body, '驳回失败'))
     return
   }
+  ElMessage.success('已驳回')
   await load()
 }
 

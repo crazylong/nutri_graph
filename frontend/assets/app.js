@@ -1125,6 +1125,8 @@ if (drawer) {
    登录成功和刷新后已有令牌，都从 hideGate 进来，所以两条路拉同一次。
    ============================================================ */
 const historyEl = document.getElementById('history');
+const historyBackdropEl = document.getElementById('history-backdrop');
+const historyCloseEl = document.getElementById('history-close');
 const sessionListEl = document.getElementById('session-list');
 const recentListEl = document.getElementById('recent-list');
 const askListEl = document.getElementById('ask-list');
@@ -1135,7 +1137,7 @@ const filterCountEl = document.getElementById('filter-count');
 function clearHistoryPanel() {
   if (sessionListEl) sessionListEl.replaceChildren();
   if (recentListEl) recentListEl.replaceChildren();
-  if (historyEl) historyEl.classList.remove('open');
+  closeHistory();
 }
 
 /* ============================================================
@@ -1314,7 +1316,7 @@ function renderRecent(rows) {
     btn.type = 'button';
     btn.title = row.question;
     btn.addEventListener('click', () => {
-      if (historyEl) historyEl.classList.remove('open');
+      closeHistory();
       ask(row.question);
     });
     recentListEl.appendChild(btn);
@@ -1344,7 +1346,7 @@ async function openSession(id) {
     if (filterCountEl) filterCountEl.textContent = '';
   }
   refreshAskList();
-  if (historyEl) historyEl.classList.remove('open');
+  closeHistory();
   loadHistory();
   scrollDown();
 }
@@ -1352,15 +1354,30 @@ async function openSession(id) {
 function startNewChat() {
   localStorage.removeItem(K_SID);
   showEmptyThread();
-  if (historyEl) historyEl.classList.remove('open');
+  closeHistory();
   loadHistory();
   if (gate.hidden) input.focus();
 }
 
 document.getElementById('new-chat').addEventListener('click', startNewChat);
-document.getElementById('history-toggle').addEventListener('click', () => {
-  historyEl.classList.toggle('open');
-});
+
+/* 历史抽屉：统一开/关，遮罩 + × + 点侧栏外都能收起 */
+function openHistory() {
+  historyEl.classList.add('open');
+  if (historyBackdropEl) historyBackdropEl.hidden = false;
+}
+function closeHistory() {
+  historyEl.classList.remove('open');
+  if (historyBackdropEl) historyBackdropEl.hidden = true;
+}
+function toggleHistory() {
+  if (historyEl.classList.contains('open')) closeHistory();
+  else openHistory();
+}
+
+document.getElementById('history-toggle').addEventListener('click', toggleHistory);
+if (historyCloseEl) historyCloseEl.addEventListener('click', closeHistory);
+if (historyBackdropEl) historyBackdropEl.addEventListener('click', closeHistory);
 
 /* ============================================================
    提问

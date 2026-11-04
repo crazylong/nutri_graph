@@ -208,6 +208,8 @@ def _index(
             rows.extend(_image_rows(doc, block, warnings, write_folder, record_folder))
             continue
         rows.append(_text_row(doc, block))
+    for index, row in enumerate(rows):
+        row["seq"] = index
     return rows
 
 

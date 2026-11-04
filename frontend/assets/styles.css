@@ -104,6 +104,20 @@ body {
 
 .history-head .primary-btn { width: 100%; }
 
+/* 关闭按钮：默认隐藏，只在抽屉形态（移动端 <800px）显示 */
+.history-close { display: none; }
+
+/* 历史抽屉遮罩：默认隐藏 */
+.history-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  background: rgba(26, 36, 30, .32);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+.history-backdrop[hidden] { display: none; }
+
 .history-scroll {
   flex: 1;
   overflow-y: auto;
@@ -376,28 +390,79 @@ details.basis li { font-size: 13px; color: var(--ink-2); margin: 3px 0; }
   text-align: center;
 }
 
+/* ============================================================
+   响应式：三端适配
+   桌面 >1024px：侧栏常驻（默认样式）
+   平板 800~1024px：侧栏收窄，可折叠
+   手机 <800px：侧栏变抽屉（遮罩 + × 关闭）
+   ============================================================ */
+
+/* ---------- 平板 800~1024 ---------- */
+@media (max-width: 1024px) and (min-width: 801px) {
+  .history { width: 216px; flex: 0 0 216px; }
+}
+
+/* ---------- 手机 <800px ---------- */
 @media (max-width: 800px) {
   .history-toggle { display: inline; }
+  .history-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 34px;
+    height: 34px;
+    font-size: 20px;
+  }
+  .history-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .history-head .primary-btn { flex: 1; }
   .history {
     position: fixed;
     z-index: 30;
     top: 0;
     bottom: 0;
     left: 0;
-    width: min(280px, 86vw);
+    width: min(300px, 84vw);
+    max-width: 84vw;
     transform: translateX(-105%);
-    transition: transform .16s ease;
-    box-shadow: var(--shadow);
+    transition: transform .18s ease;
+    box-shadow: var(--shadow-lg);
   }
   .history.open { transform: none; }
+
+  /* 顶栏：窄屏隐藏次要入口，只保留品牌 + 历史 + 用户 */
+  .topnav a { display: none; }
+  .topnav #open-graph { display: none; }
 }
 
+/* ---------- 手机 <640px ---------- */
 @media (max-width: 640px) {
-  .topbar { padding: 12px 14px; }
+  .topbar { padding: 11px 12px; }
   .topbar p { display: none; }
-  .thread { padding: 18px 14px 6px; }
-  .composer { padding: 10px 14px 8px; }
-  .q .bubble { max-width: 88%; }
+  .topbar h1 { font-size: 15px; }
+  .brand { gap: 8px; }
+  .topnav { gap: 10px; }
+  .topnav .who { padding-left: 10px; gap: 6px; }
+
+  .thread { padding: 16px 12px 6px; }
+  .thread > * { max-width: 100%; }
+
+  .composer { padding: 10px 12px 8px; }
+  .composer-inner { border-radius: 12px; }
+  .hint { font-size: 11px; }
+
+  .q .bubble { max-width: 86%; }
+  .a { gap: 9px; }
+  .avatar { flex: 0 0 27px; height: 27px; font-size: 12px; }
+  .card { padding: 13px 14px; }
+
+  /* 事实表格在窄屏横向滚动，避免挤爆 */
+  .facts-table { display: block; overflow-x: auto; white-space: nowrap; }
+  .facts-table th, .facts-table td { white-space: normal; }
 }
 
 /* ---------- 事实表格 ---------- */

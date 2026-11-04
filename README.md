@@ -54,6 +54,7 @@ KB_RERANK_CANDIDATES=20
 RERANK_BASE_URL=https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank
 KB_DIVERSIFY_ENABLED=true
 KB_DIVERSIFY_THRESHOLD=0.72
+KB_NEIGHBOR_ENABLED=true
 ```
 
 三种失败，三种处置：

@@ -2,14 +2,14 @@
   <div v-loading="loading">
     <h2>概览</h2>
     <el-row :gutter="12">
-      <el-col :span="8"><el-card><div class="n">{{ users }}</div><div>活跃用户</div></el-card></el-col>
-      <el-col :span="8"><el-card><div class="n">{{ pendingBundles }}</div><div>待审补录</div></el-card></el-col>
-      <el-col :span="8"><el-card><div class="n">{{ requestSummary }}</div><div>未收录各状态</div></el-card></el-col>
+      <el-col :xs="24" :sm="12" :md="8"><el-card><div class="n">{{ users }}</div><div>活跃用户</div></el-card></el-col>
+      <el-col :xs="24" :sm="12" :md="8"><el-card><div class="n">{{ pendingBundles }}</div><div>待审补录</div></el-card></el-col>
+      <el-col :xs="24" :sm="24" :md="8"><el-card><div class="n">{{ requestSummary }}</div><div>未收录各状态</div></el-card></el-col>
     </el-row>
     <el-row :gutter="12" style="margin-top: 12px">
-      <el-col :span="8"><el-card><div class="n">{{ todayCalls }}</div><div>今日模型调用</div></el-card></el-col>
-      <el-col :span="8"><el-card><div class="n">{{ todayTokens }}</div><div>今日 token</div></el-card></el-col>
-      <el-col :span="8"><el-card><div class="n">{{ todayCost }}</div><div>今日费用（元）</div></el-card></el-col>
+      <el-col :xs="24" :sm="12" :md="8"><el-card><div class="n">{{ todayCalls }}</div><div>今日模型调用</div></el-card></el-col>
+      <el-col :xs="24" :sm="12" :md="8"><el-card><div class="n">{{ todayTokens }}</div><div>今日 token</div></el-card></el-col>
+      <el-col :xs="24" :sm="24" :md="8"><el-card><div class="n">{{ todayCost }}</div><div>今日费用（元）</div></el-card></el-col>
     </el-row>
     <el-table v-if="topUsers.length" :data="topUsers" size="small" style="margin-top: 12px">
       <el-table-column prop="user_id" label="用户" />
@@ -56,6 +56,9 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.n { font-size: 22px; font-weight: 600; margin-bottom: 6px; }
+.n { font-size: 22px; font-weight: 600; margin-bottom: 6px; overflow-wrap: anywhere; }
 .err { color: #c45656; }
+@media (max-width: 768px) {
+  .el-col { margin-bottom: 12px; }
+}
 </style>

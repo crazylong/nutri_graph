@@ -74,9 +74,41 @@
         还没有跑过评估。点击「手动触发评估」，用 eval/kb_pairs.jsonl 和 eval/kb_qa.jsonl 里的对照题跑一次。
       </p>
       <template v-else>
-        <p class="eval-time">时间：{{ evalRun.created_at }}</p>
-        <p><b>Ragas</b>（忠实度 / 答案相关性 / 上下文精确度）：{{ formatJson(evalRun.ragas) }}</p>
-        <p><b>Recall</b>（R@1 / R@5 / R@10 / MRR）：{{ formatJson(evalRun.recall) }}</p>
+        <p class="eval-time">评估时间 {{ formatTime(evalRun.created_at) }}</p>
+        <p class="eval-legend">越高越好。绿色达到 85%，黄色达到 70%，红色低于 70%。</p>
+
+        <section class="eval-block">
+          <div class="eval-block-head">
+            <span class="eval-block-title">生成质量</span>
+            <span v-if="ragasMeta" class="eval-block-meta">{{ ragasMeta }}</span>
+          </div>
+          <p v-if="ragasSkipped" class="eval-note">{{ ragasSkipped }}</p>
+          <div v-if="ragasCards.length" class="eval-grid">
+            <div v-for="item in ragasCards" :key="item.key" class="eval-metric">
+              <div class="eval-score" :class="scoreClass(item.value)">{{ item.text }}</div>
+              <div class="eval-name">{{ item.name }}</div>
+              <div class="eval-hint">{{ item.hint }}</div>
+              <div class="eval-bar"><span :style="barStyle(item.value)"></span></div>
+            </div>
+          </div>
+          <p v-else-if="!ragasSkipped" class="eval-missing">这次没有生成质量样本。</p>
+        </section>
+
+        <section class="eval-block">
+          <div class="eval-block-head">
+            <span class="eval-block-title">检索召回</span>
+            <span v-if="recallMeta" class="eval-block-meta">{{ recallMeta }}</span>
+          </div>
+          <div v-if="recallCards.length" class="eval-grid">
+            <div v-for="item in recallCards" :key="item.key" class="eval-metric">
+              <div class="eval-score" :class="scoreClass(item.value)">{{ item.text }}</div>
+              <div class="eval-name">{{ item.name }}</div>
+              <div class="eval-hint">{{ item.hint }}</div>
+              <div class="eval-bar"><span :style="barStyle(item.value)"></span></div>
+            </div>
+          </div>
+          <p v-else class="eval-missing">这次没有检索对照题。</p>
+        </section>
       </template>
     </el-card>
 
@@ -112,7 +144,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { QuestionFilled } from '@element-plus/icons-vue'
 import { api, errorMessage, readJson } from '../api'
@@ -144,9 +176,76 @@ function kindLabel(value) {
 function statusLabel(value) {
   return { pending: '待审', approved: '已通过', rejected: '已驳回' }[value] || value
 }
-function formatJson(value) {
-  if (!value) return '—'
-  return JSON.stringify(value)
+const RAGAS_FIELDS = [
+  { key: 'faithfulness', name: '忠实度', hint: '答案是否依据文档，没有编造' },
+  { key: 'answer_relevancy', name: '答案相关性', hint: '回答是否切题' },
+  { key: 'llm_context_precision_without_reference', name: '上下文精确度', hint: '捞回的片段是否对准问题' },
+  { key: 'abstention_correctness', name: '弃答正确率', hint: '该拒答的题有没有拒答' },
+]
+const RECALL_FIELDS = [
+  { key: 'recall_at_1', name: '前 1 条命中', hint: '第一条就是对照答案' },
+  { key: 'recall_at_5', name: '前 5 条命中', hint: '前五条里出现对照答案' },
+  { key: 'recall_at_10', name: '前 10 条命中', hint: '前十条里出现对照答案' },
+  { key: 'mrr', name: '排序质量', hint: '正确答案越靠前越高，满分 1', asNumber: true },
+]
+
+const ragasCards = computed(() => metricCards(evalRun.value && evalRun.value.ragas, RAGAS_FIELDS))
+const recallCards = computed(() => metricCards(evalRun.value && evalRun.value.recall, RECALL_FIELDS))
+const ragasMeta = computed(() => sampleLine(evalRun.value && evalRun.value.ragas, true))
+const recallMeta = computed(() => sampleLine(evalRun.value && evalRun.value.recall, false))
+const ragasSkipped = computed(() => {
+  const source = evalRun.value && evalRun.value.ragas
+  return source && source.skipped ? String(source.skipped) : ''
+})
+
+function formatTime(value) {
+  const match = String(value || '').match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/)
+  return match ? `${match[1]} ${match[2]}` : (value || '')
+}
+
+function sampleLine(source, withBreakdown) {
+  if (!source || source.n == null) return ''
+  const parts = [`${source.n} 题`]
+  const breakdown = withBreakdown && source.breakdown
+  if (breakdown) {
+    if (breakdown.grounded != null) parts.push(`有据回答 ${breakdown.grounded}`)
+    if (breakdown.abstain != null) parts.push(`应弃答 ${breakdown.abstain}`)
+  }
+  return parts.join(' · ')
+}
+
+function metricCards(source, fields) {
+  if (!source || typeof source !== 'object') return []
+  return fields
+    .filter((field) => source[field.key] != null && source[field.key] !== '')
+    .map((field) => {
+      const value = Number(source[field.key])
+      const ok = Number.isFinite(value)
+      return {
+        key: field.key,
+        name: field.name,
+        hint: field.hint,
+        value: ok ? value : null,
+        text: !ok ? '—' : field.asNumber ? value.toFixed(2) : formatPct(value),
+      }
+    })
+}
+
+function formatPct(value) {
+  return `${(value * 100).toFixed(1)}%`
+}
+
+function scoreClass(value) {
+  if (value == null) return ''
+  if (value >= 0.85) return 'good'
+  if (value >= 0.7) return 'mid'
+  return 'low'
+}
+
+function barStyle(value) {
+  const colors = { good: '#2f7d5d', mid: '#c4922a', low: '#c45656' }
+  const width = value == null ? 0 : Math.max(0, Math.min(100, value * 100))
+  return { width: `${width}%`, background: colors[scoreClass(value)] || '#c5d0c8' }
 }
 
 function query() {
@@ -316,7 +415,89 @@ onMounted(load)
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 .eval-time {
-  color: #606266;
+  margin: 0;
+  color: #3d4f46;
+  font-weight: 600;
+}
+.eval-legend {
+  margin: 4px 0 0;
+  color: #87948b;
+  font-size: 12px;
+}
+.eval-block {
+  margin-top: 16px;
+}
+.eval-block-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.eval-block-title {
+  font-weight: 650;
+  color: #1a241e;
+}
+.eval-block-meta {
+  font-size: 13px;
+  color: #87948b;
+}
+.eval-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.eval-metric {
+  min-width: 0;
+  padding: 12px 12px 10px;
+  background: #f7faf8;
+  border: 1px solid #e3e9e4;
+  border-radius: 10px;
+}
+.eval-score {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.eval-score.good { color: #2f7d5d; }
+.eval-score.mid { color: #b07d1a; }
+.eval-score.low { color: #c45656; }
+.eval-name {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 650;
+  color: #1a241e;
+}
+.eval-hint {
+  margin-top: 2px;
+  min-height: 2.8em;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #87948b;
+}
+.eval-bar {
+  height: 4px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #e3e9e4;
+}
+.eval-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+}
+.eval-note,
+.eval-missing {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #8a6a12;
+}
+.eval-missing { color: #87948b; }
+@media (max-width: 980px) {
+  .eval-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .eval-schedule {
   margin-bottom: 10px;

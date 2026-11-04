@@ -40,36 +40,42 @@
     </div>
   </form>
   <main v-else class="page" @paste="onPaste">
-    <aside class="sidebar">
-      <button type="button" class="ghost" @click="fresh">新对话</button>
-      <h2>历史会话</h2>
-      <p v-if="!sessions.length" class="empty">还没有对话</p>
-      <button
-        v-for="item in sessions"
-        :key="item.id"
-        type="button"
-        class="history"
-        :class="{ active: item.id === sessionId }"
-        @click="openSession(item.id)"
-      >
-        <span class="title">{{ item.title || '未命名对话' }}</span>
-        <span class="when">{{ formatWhen(item.last_at) }}</span>
-      </button>
-      <h2>最近问过</h2>
-      <p v-if="!recent.length" class="empty">还没有提问</p>
-      <button
-        v-for="(item, index) in recent"
-        :key="index"
-        type="button"
-        class="recent"
-        @click="askRecent(item.question)"
-      >{{ item.question }}</button>
-    </aside>
-    <div class="main">
     <header class="bar">
+      <button type="button" class="menu-btn" :aria-label="sidebarOpen ? '收起历史会话' : '展开历史会话'" @click="sidebarOpen = !sidebarOpen">
+        <span class="menu-icon" aria-hidden="true"></span>
+      </button>
       <h1>企业知识库</h1>
       <button type="button" class="ghost" @click="logout">退出</button>
     </header>
+    <aside class="sidebar" :class="{ open: sidebarOpen }">
+      <div class="sidebar-body">
+        <button type="button" class="ghost" @click="fresh">新对话</button>
+        <h2>历史会话</h2>
+        <p v-if="!sessions.length" class="empty">还没有对话</p>
+        <button
+          v-for="item in sessions"
+          :key="item.id"
+          type="button"
+          class="history"
+          :class="{ active: item.id === sessionId }"
+          @click="openSession(item.id)"
+        >
+          <span class="title">{{ item.title || '未命名对话' }}</span>
+          <span class="when">{{ formatWhen(item.last_at) }}</span>
+        </button>
+        <h2>最近问过</h2>
+        <p v-if="!recent.length" class="empty">还没有提问</p>
+        <button
+          v-for="(item, index) in recent"
+          :key="index"
+          type="button"
+          class="recent"
+          @click="askRecent(item.question)"
+        >{{ item.question }}</button>
+      </div>
+    </aside>
+    <div v-if="sidebarOpen" class="sidebar-backdrop" @click="sidebarOpen = false"></div>
+    <div class="main">
     <section v-if="turns.length" class="thread">
       <article v-for="(turn, index) in turns" :key="index" :class="turn.role">
         <p class="who">{{ turn.role === 'user' ? '提问' : '回答' }}</p>
@@ -162,6 +168,7 @@ const turns = ref([])
 const sessions = ref([])
 const recent = ref([])
 const sessionId = ref(localStorage.getItem(SESSION_KEY) || '')
+const sidebarOpen = ref(false)
 
 function saveTokens(body) {
   access.value = body.access_token || ''
@@ -718,6 +725,10 @@ async function ask() {
 </script>
 
 <style>
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
 :root {
   --ng-bg: #f4f7f3;
   --ng-panel: #ffffff;
@@ -737,11 +748,12 @@ body {
   font-family: "PingFang SC", "Noto Sans SC", -apple-system, BlinkMacSystemFont, sans-serif;
   background-color: var(--ng-bg);
   background-image:
-    radial-gradient(1000px 520px at 15% -10%, #e7f3ec 0%, rgba(231, 243, 236, 0) 60%),
-    radial-gradient(800px 460px at 100% 0%, #eef5ee 0%, rgba(238, 245, 238, 0) 55%);
+    radial-gradient(1000px 520px at 15% -10%, #edf4ef 0%, rgba(237, 244, 239, 0) 60%),
+    radial-gradient(800px 460px at 100% 0%, #f2f6f3 0%, rgba(242, 246, 243, 0) 55%);
   background-attachment: fixed;
   color: var(--ng-ink);
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
 .gate {
@@ -754,7 +766,8 @@ body {
 .gate-card {
   width: 100%;
   max-width: 400px;
-  padding: 28px 26px 24px;
+  min-width: 0;
+  padding: 28px 22px 24px;
   background: #fff;
   border: 1px solid var(--ng-line);
   border-radius: 16px;
@@ -818,6 +831,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 .gate .code-row input,
 .gate .captcha-row input { flex: 1; min-width: 0; }
@@ -842,6 +856,12 @@ body {
   border-radius: 10px;
   cursor: pointer;
 }
+/* 极窄屏：图形码行、验证码行允许换行，避免挤压溢出 */
+@media (max-width: 360px) {
+  .gate .code-row,
+  .gate .captcha-row { flex-wrap: wrap; }
+  .gate .code-row button.ghost { flex: 1 1 auto; }
+}
 .gate button.submit {
   width: 100%;
   height: 44px;
@@ -853,21 +873,46 @@ body {
 .page {
   max-width: 1040px;
   margin: 0 auto;
-  padding: 24px 20px 72px;
+  padding: 16px 16px 72px;
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   align-items: flex-start;
+  min-width: 0;
+  overflow-x: hidden;
+}
+@media (min-width: 721px) {
+  .page {
+    margin: 0;
+    max-width: none;
+    padding: 12px 12px 72px;
+  }
+}
+.page .bar {
+  flex-basis: 100%;
 }
 .sidebar {
-  width: 260px;
-  flex: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 2000;
+  width: 280px;
+  max-width: 85vw;
   background: var(--ng-panel);
-  border: 1px solid var(--ng-line);
-  border-radius: 14px;
-  box-shadow: var(--ng-shadow-sm);
+  border-right: 1px solid var(--ng-line);
+  box-shadow: 2px 0 18px rgba(26, 36, 30, .12);
   padding: 14px;
-  max-height: calc(100vh - 48px);
   overflow: auto;
+  transform: translateX(-100%);
+  transition: transform .22s ease;
+}
+.sidebar.open { transform: translateX(0); }
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1999;
+  background: rgba(26, 36, 30, .35);
 }
 .sidebar h2 {
   margin: 16px 0 8px;
@@ -903,21 +948,56 @@ body {
 .sidebar .when { display: block; color: var(--ng-ink-3); font-size: 12px; margin-top: 2px; }
 .main { flex: 1; min-width: 0; }
 @media (max-width: 720px) {
-  .page { flex-direction: column; }
-  .sidebar { width: 100%; max-height: 220px; }
+  .page { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
+  .page .bar { flex-basis: auto; }
+  .sidebar { width: 85vw; max-width: 320px; }
 }
 
 .bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px;
+  gap: 10px;
+  padding: 10px 14px;
   background: rgba(255, 255, 255, .82);
   backdrop-filter: blur(12px);
   border: 1px solid var(--ng-line);
   border-radius: 14px;
   box-shadow: var(--ng-shadow-sm);
-  margin-bottom: 20px;
+  margin-bottom: 16px;
+}
+.bar h1 { flex: 1; text-align: left; }
+/* 折叠按钮（汉堡），与后台一致 */
+.menu-btn {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--ng-line);
+  border-radius: 8px;
+  cursor: pointer;
+  box-shadow: none;
+}
+.menu-btn:hover { background: var(--ng-accent-weak); border-color: var(--ng-accent); transform: none; }
+.menu-icon,
+.menu-icon::before,
+.menu-icon::after {
+  display: block;
+  width: 16px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--ng-accent);
+  content: '';
+  position: relative;
+}
+.menu-icon::before { position: absolute; top: -5px; left: 0; }
+.menu-icon::after { position: absolute; top: 5px; left: 0; }
+@media (max-width: 720px) {
+  .bar { padding: 8px 12px; margin-bottom: 10px; border-radius: 10px; }
+  .bar h1 { font-size: 16px; }
 }
 
 h1 {
@@ -951,17 +1031,40 @@ button.ghost:hover { border-color: var(--ng-accent); background: var(--ng-accent
 .user { display: flex; flex-direction: column; align-items: flex-end; }
 .user .who {
   margin: 0 6px 5px 0;
-  color: var(--ng-ink-3);
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--ng-accent-weak);
+  color: var(--ng-accent);
+  border: 1px solid var(--ng-line);
   font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .5px;
 }
 .user .reply { width: fit-content; max-width: 82%; }
 .user .content {
-  background: var(--ng-accent-grad);
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(260px 160px at 100% 0%, rgba(255, 255, 255, .32) 0%, rgba(255, 255, 255, 0) 55%),
+    radial-gradient(200px 120px at 0% 100%, rgba(20, 90, 60, .40) 0%, rgba(20, 90, 60, 0) 60%),
+    var(--ng-accent-grad);
   color: #fff;
   padding: 11px 16px;
   border-radius: 14px 14px 4px 14px;
   white-space: pre-wrap;
   box-shadow: 0 6px 16px rgba(47, 125, 93, .18);
+}
+/* 提问气泡装饰：右下角大号引号水印 */
+.user .content::after {
+  content: '“';
+  position: absolute;
+  right: 6px;
+  bottom: -14px;
+  font-size: 56px;
+  line-height: 1;
+  font-weight: 700;
+  color: rgba(255, 255, 255, .14);
+  pointer-events: none;
 }
 .user .sent-shot {
   display: block;
@@ -978,22 +1081,37 @@ button.ghost:hover { border-color: var(--ng-accent); background: var(--ng-accent
   flex: 0 0 auto;
   width: 30px; height: 30px;
   border-radius: 9px;
-  background: var(--ng-accent-grad);
-  color: #fff;
+  background: var(--ng-accent-weak);
+  border: 1px solid var(--ng-line);
+  color: var(--ng-accent);
   display: grid; place-items: center;
   font-size: 12px;
   font-weight: 600;
   margin: 3px 0 0;
-  box-shadow: 0 3px 10px rgba(47, 125, 93, .18);
 }
 .assistant .reply { flex: 1; min-width: 0; }
 .assistant .content {
+  position: relative;
   margin: 0;
-  background: #fff;
+  background:
+    radial-gradient(360px 200px at 0% 0%, #e6f4ea 0%, rgba(230, 244, 234, 0) 60%),
+    radial-gradient(280px 160px at 100% 100%, #f0f7f1 0%, rgba(240, 247, 241, 0) 55%),
+    linear-gradient(180deg, #ffffff 0%, #f6faf7 100%);
   border: 1px solid var(--ng-line);
   border-radius: 4px 14px 14px 14px;
   padding: 14px 16px;
   box-shadow: var(--ng-shadow-sm);
+}
+/* 回答气泡装饰：右上角淡绿叶子水印 */
+.assistant .content::after {
+  content: '❋';
+  position: absolute;
+  right: 10px;
+  top: 6px;
+  font-size: 26px;
+  line-height: 1;
+  color: rgba(47, 125, 93, .18);
+  pointer-events: none;
 }
 .md { overflow-wrap: anywhere; line-height: 1.65; }
 .md > :first-child { margin-top: 0; }
@@ -1065,10 +1183,27 @@ button.ghost:hover { border-color: var(--ng-accent); background: var(--ng-accent
 .hit > div { min-width: 0; flex: 1; }
 .hit .md { font-size: 13px; color: var(--ng-ink-2); }
 .path { color: var(--ng-ink-3); font-size: 13px; margin-bottom: 4px; }
+@media (max-width: 560px) {
+  .hit { flex-direction: column; }
+  .hit img { width: 100%; height: auto; max-height: 180px; }
+}
 
 /* 输入区做成一张卡片 */
 label, .field { display: block; margin: 14px 0; font-size: 14px; color: var(--ng-ink-2); }
 .field-name { cursor: text; }
+
+/* 租户选择 + 问题输入 + 提问按钮统一为底部输入面板 */
+.main > label {
+  margin: 0 0 12px;
+  max-width: 100%;
+}
+.main > label select { margin-top: 6px; }
+.main > .field { margin: 0 0 12px; }
+.main > button {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
 .ask-card {
   margin-top: 6px;
   background: #fff;

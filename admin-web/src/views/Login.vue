@@ -145,14 +145,19 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.login { min-height: 100vh; display: grid; place-items: center; background: #f4f6f8; }
-.card { width: 420px; }
+.login { min-height: 100vh; display: grid; place-items: center; background: #f4f6f8; padding: 20px 12px; box-sizing: border-box; }
+.card { width: 100%; max-width: 420px; min-width: 0; box-sizing: border-box; }
 /* 标题条本身就是品牌绿底（theme.css 里 .login .card h1 上色），
    所以这里只把标和字排一行，别再动 margin/背景 */
 .brand-row { display: flex; align-items: center; gap: 10px; font-size: 20px; }
-.code, .captcha { display: flex; gap: 8px; width: 100%; }
+.code, .captcha { display: flex; gap: 8px; width: 100%; min-width: 0; }
 .captcha img { cursor: pointer; height: 40px; border: 1px solid #dcdfe6; border-radius: 4px; }
 .msg, .denied { color: #c45656; font-size: 13px; }
 .denied { margin-bottom: 12px; }
+/* 极窄屏：验证码行允许换行，避免挤压溢出 */
+@media (max-width: 360px) {
+  .code { flex-wrap: wrap; }
+  .code .el-button { flex: 1 1 auto; }
+}
 </style>
 

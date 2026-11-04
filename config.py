@@ -119,6 +119,8 @@ RERANK_BASE_URL = os.getenv(
 # 近义正文收成一条。关掉则排序后直接取前 KB_SEARCH_LIMIT 条。
 KB_DIVERSIFY_ENABLED = os.getenv("KB_DIVERSIFY_ENABLED", "true").lower() == "true"
 KB_DIVERSIFY_THRESHOLD = float(os.getenv("KB_DIVERSIFY_THRESHOLD", "0.72"))
+# 文本提问在收敛之后，按入库序号补同一章节的前一块和后一块。
+KB_NEIGHBOR_ENABLED = os.getenv("KB_NEIGHBOR_ENABLED", "true").lower() == "true"
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 # 推理模型（deepseek / qwen-thinking）会把 completion 预算先花在 reasoning 上，

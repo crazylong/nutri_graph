@@ -2,6 +2,10 @@
    覆盖 Element Plus 默认蓝色，统一为「精致食疗绿」。
    通过 CSS 变量覆盖 + 少量组件微调，不改组件结构。 */
 
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
 :root {
   /* Element Plus 主色变量 */
   --el-color-primary: #2f7d5d;
@@ -40,6 +44,7 @@ html, body {
   background: var(--ng-bg);
   color: var(--ng-ink);
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
 /* 登录页 */
@@ -159,6 +164,7 @@ html, body {
   border: 1px solid var(--ng-line);
   border-radius: 12px;
   box-shadow: var(--ng-shadow);
+  min-width: 0;
 }
 .el-main .filters.stack {
   flex-direction: column;
@@ -168,6 +174,7 @@ html, body {
 .el-main .filters .el-form-item {
   margin-bottom: 0;
   margin-right: 12px;
+  min-width: 0;
 }
 
 .el-main .el-table {
@@ -178,6 +185,7 @@ html, body {
   --el-table-header-bg-color: #f4f8f5;
   --el-table-header-text-color: #3d4f46;
   --el-table-border-color: #e7eee9;
+  max-width: 100%;
 }
 .el-main .el-table.el-table--border {
   border: 1px solid var(--ng-line);
@@ -194,4 +202,21 @@ html, body {
   -webkit-text-fill-color: transparent;
   font-size: 26px;
   font-weight: 700;
+}
+
+/* 移动端兜底：表格容器可横向滚动，避免撑破页面 */
+@media (max-width: 768px) {
+  .el-main {
+    padding: 12px;
+    min-width: 0;
+    overflow-x: hidden;
+  }
+  .el-main .filters .el-form-item {
+    width: 100%;
+    margin-right: 0;
+  }
+  .el-main .filters .el-input,
+  .el-main .filters .el-select {
+    width: 100% !important;
+  }
 }

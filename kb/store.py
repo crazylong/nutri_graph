@@ -103,8 +103,8 @@ def replace_chunks(doc_id: str, rows: list[dict]) -> None:
                 """
                 INSERT INTO kb_chunk (
                     id, doc_id, tenant_id, block_kind, text, page_no, bbox,
-                    heading_path, image_path, image_md5
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    heading_path, image_path, image_md5, seq
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
                 (
                     row["chunk_id"], doc_id, row["tenant_id"], row["block_kind"],
@@ -113,8 +113,44 @@ def replace_chunks(doc_id: str, rows: list[dict]) -> None:
                     row.get("heading_path") or "",
                     row.get("image_path") or None,
                     row.get("image_md5"),
+                    row.get("seq"),
                 ),
             )
+
+
+def neighbors_of(hits: list[dict]) -> dict[str, dict]:
+    """同一篇、同一章节、序号相差 1 的块。序号为空的命中没有邻居。"""
+    ids = [hit.get("chunk_id") for hit in hits or [] if hit.get("chunk_id")]
+    if not ids:
+        return {}
+    with db.connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT h.id AS hit_id, h.seq AS hit_seq,
+                   n.id, n.doc_id, n.seq, n.block_kind, n.text, n.heading_path, n.image_path
+            FROM kb_chunk h
+            JOIN kb_chunk n
+              ON n.doc_id = h.doc_id
+             AND n.heading_path = h.heading_path
+             AND h.seq IS NOT NULL
+             AND n.seq IN (h.seq - 1, h.seq + 1)
+            WHERE h.id = ANY(%s)
+            """,
+            (ids,),
+        )
+        rows = cur.fetchall()
+    found: dict[str, dict] = {}
+    for row in rows:
+        side = "prev" if row["seq"] < row["hit_seq"] else "next"
+        found.setdefault(row["hit_id"], {})[side] = {
+            "chunk_id": row["id"],
+            "doc_id": str(row["doc_id"]),
+            "block_kind": row["block_kind"],
+            "text": row["text"],
+            "heading_path": row["heading_path"] or "",
+            "image_path": row["image_path"] or "",
+        }
+    return found
 
 
 def delete_chunks(doc_id: str) -> None:

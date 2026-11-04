@@ -7,8 +7,7 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 import config
-from kb import rerank
-from kb import diversify
+from kb import diversify, neighbor, rerank, store
 from kb.common import ABSTAIN, format_hit
 from kb.search import search_picture, search_question
 from llm import invoke_model, stream_model
@@ -52,8 +51,10 @@ def run_ask(*, tenant_id: str, question: str = "", image: bytes | None = None, i
             "block_kind": hit["block_kind"],
             "text": hit["text"],
             "heading_path": hit["heading_path"],
-            "score": hit["score"],
+            "score": hit.get("score"),
         }
+        if hit.get("neighbor"):
+            item["neighbor"] = True
         if hit.get("image_path") and hit.get("chunk_id"):
             item["image_url"] = f"/kb/images/{hit['chunk_id']}?tenant_id={tenant_id}"
         hits.append(item)
@@ -83,6 +84,7 @@ def _retrieve(state: dict) -> dict:
             if _rerank_on():
                 hits = _rerank(question, hits)
             hits = _diversify(hits)
+            hits = _neighbors(hits)
         box.output = ",".join(hit["chunk_id"] for hit in hits)
     return {"hits": hits}
 
@@ -126,6 +128,21 @@ def _diversify(hits: list[dict]) -> list[dict]:
             log.warning("收敛异常，退回排序后的前 N 条：%s", exc)
             kept = list(hits[:limit])
         box.output = ",".join(str(hit.get("chunk_id") or "") for hit in kept if isinstance(hit, dict))
+    return kept
+
+
+def _neighbors(hits: list[dict]) -> list[dict]:
+    if not config.KB_NEIGHBOR_ENABLED:
+        return hits
+    label = ",".join(str(hit.get("chunk_id") or "") for hit in hits if isinstance(hit, dict))
+    with span("node", "kb_neighbor", input=label) as box:
+        try:
+            kept = neighbor.attach(hits, store.neighbors_of(hits))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("相邻块补齐失败，只保留收敛结果：%s", exc)
+            kept = hits
+        added = [hit.get("chunk_id") for hit in kept if isinstance(hit, dict) and hit.get("neighbor")]
+        box.output = ",".join(str(item) for item in added if item)
     return kept
 
 
